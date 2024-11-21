@@ -73,6 +73,7 @@ class EbookManager(QMainWindow):
         self.zoom_factor = 1.0  # 缩放因子
         self.min_zoom = 0.1  # 最小缩放
         self.max_zoom = 5.0  # 最大缩放
+        self.booklist_visible = True  # 书籍列表显示状态
         self.init_ui()
         self.load_library()
         self.load_notes()
@@ -88,12 +89,12 @@ class EbookManager(QMainWindow):
         layout = QHBoxLayout(main_widget)
 
         # 创建分割器
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(splitter)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(self.splitter)
 
         # 左侧面板
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
+        self.left_panel = QWidget()
+        left_layout = QVBoxLayout(self.left_panel)
 
         # 搜索框
         search_layout = QHBoxLayout()
@@ -124,12 +125,16 @@ class EbookManager(QMainWindow):
         # 工具栏
         toolbar = QHBoxLayout()
 
+        # 显示/隐藏书籍列表按钮
+        self.toggle_booklist_btn = QPushButton('隐藏书籍列表')
+        self.toggle_booklist_btn.clicked.connect(self.toggle_booklist)
+        toolbar.addWidget(self.toggle_booklist_btn)
+
         # 页面导航
         self.prev_btn = QPushButton('上一页')
         self.next_btn = QPushButton('下一页')
 
         # 页码显示和跳转
-        page_nav_layout = QHBoxLayout()
         self.current_page_label = QLabel('0/0')  # 显示当前页码
         self.page_input = QLineEdit()
         self.page_input.setFixedWidth(50)
@@ -140,6 +145,10 @@ class EbookManager(QMainWindow):
         self.zoom_in_btn = QPushButton('放大')
         self.zoom_out_btn = QPushButton('缩小')
         self.zoom_label = QLabel('100%')
+
+        # 当前书籍名称
+        self.current_book_label = QLabel()
+        self.current_book_label.setStyleSheet("font-weight: bold;")
 
         # 其他按钮
         self.add_note_btn = QPushButton('添加笔记')
@@ -165,6 +174,7 @@ class EbookManager(QMainWindow):
         toolbar.addWidget(self.zoom_out_btn)
         toolbar.addWidget(self.zoom_label)
         toolbar.addWidget(self.zoom_in_btn)
+        toolbar.addWidget(self.current_book_label)
         toolbar.addWidget(self.add_note_btn)
         toolbar.addWidget(self.color_btn)
         toolbar.addWidget(self.clear_marks_btn)
@@ -199,9 +209,9 @@ class EbookManager(QMainWindow):
         toolbar.addWidget(self.toggle_notes_btn)
 
         # 添加到分割器
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(1, 2)
+        self.splitter.addWidget(self.left_panel)
+        self.splitter.addWidget(right_panel)
+        self.splitter.setStretchFactor(1, 2)
 
         # 设置样式
         self.setStyleSheet("""
@@ -224,6 +234,16 @@ class EbookManager(QMainWindow):
                 border-radius: 4px;
             }
         """)
+
+    def toggle_booklist(self):
+        """切换书籍列表显示状态"""
+        if self.booklist_visible:
+            self.left_panel.hide()
+            self.toggle_booklist_btn.setText('显示书籍列表')
+        else:
+            self.left_panel.show()
+            self.toggle_booklist_btn.setText('隐藏书籍列表')
+        self.booklist_visible = not self.booklist_visible
 
     def load_library(self):
         """加载书库"""
@@ -377,6 +397,9 @@ class EbookManager(QMainWindow):
 
         try:
             self.current_book_path = file_path
+            # 更新当前书籍名称显示
+            self.current_book_label.setText(f"当前阅读: {item.text(0)}")
+
             ext = os.path.splitext(file_path)[1].lower()
             if ext == '.pdf':
                 self.open_pdf(file_path)
@@ -622,12 +645,39 @@ class EbookManager(QMainWindow):
             content_edit.setReadOnly(True)
             layout.addWidget(content_edit)
 
+            # 按钮布局
+            button_layout = QHBoxLayout()
+
+            # 删除按钮
+            delete_btn = QPushButton('删除')
+            delete_btn.clicked.connect(lambda: self.delete_note(note, dialog))
+            button_layout.addWidget(delete_btn)
+
             # 关闭按钮
             close_btn = QPushButton('关闭')
             close_btn.clicked.connect(dialog.accept)
-            layout.addWidget(close_btn)
+            button_layout.addWidget(close_btn)
+
+            layout.addLayout(button_layout)
 
             dialog.exec()
+
+    def delete_note(self, note, dialog):
+        """删除笔记"""
+        reply = QMessageBox.question(self, '确认删除',
+                                     '确定要删除这条笔记吗？',
+                                     QMessageBox.StandardButton.Yes |
+                                     QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            # 从笔记列表中删除
+            self.notes[self.current_book_path].remove(note)
+            if not self.notes[self.current_book_path]:
+                del self.notes[self.current_book_path]
+
+            self.save_notes()
+            self.update_notes_list()
+            dialog.accept()
 
     def toggle_notes_panel(self):
         """切换笔记面板显示状态"""
@@ -656,44 +706,48 @@ class EbookManager(QMainWindow):
             format_item.setHidden(not has_visible_children)
 
     def show_book_menu(self, position):
-        """显示书籍右键菜单"""
-        item = self.book_tree.itemAt(position)
-        if not item:
-            return
+        """显示书籍右键"""
 
-        menu = QMenu()
+        def show_book_menu(self, position):
+            """显示书籍右键菜单"""
+            item = self.book_tree.itemAt(position)
+            if not item:
+                return
 
-        if item.parent():  # 书籍项
-            open_action = QAction('打开', self)
-            open_action.triggered.connect(lambda: self.open_book(item))
-            menu.addAction(open_action)
+            menu = QMenu()
 
-            delete_action = QAction('删除', self)
-            delete_action.triggered.connect(lambda: self.delete_book(item))
-            menu.addAction(delete_action)
+            if item.parent():  # 书籍项
+                open_action = QAction('打开', self)
+                open_action.triggered.connect(lambda: self.open_book(item))
+                menu.addAction(open_action)
 
-        menu.exec(self.book_tree.viewport().mapToGlobal(position))
+                delete_action = QAction('删除', self)
+                delete_action.triggered.connect(lambda: self.delete_book(item))
+                menu.addAction(delete_action)
 
-    def delete_book(self, item):
-        """删除书籍"""
-        file_path = item.data(0, Qt.ItemDataRole.UserRole)
-        reply = QMessageBox.question(self, '确认删除',
-                                     '确定要从库中删除这本书吗？',
-                                     QMessageBox.StandardButton.Yes |
-                                     QMessageBox.StandardButton.No)
+            menu.exec(self.book_tree.viewport().mapToGlobal(position))
 
-        if reply == QMessageBox.StandardButton.Yes:
-            del self.books[file_path]
-            self.save_library()
-            self.update_book_tree()
+        def delete_book(self, item):
+            """删除书籍"""
+            file_path = item.data(0, Qt.ItemDataRole.UserRole)
+            reply = QMessageBox.question(self, '确认删除',
+                                         '确定要从库中删除这本书吗？',
+                                         QMessageBox.StandardButton.Yes |
+                                         QMessageBox.StandardButton.No)
 
+            if reply == QMessageBox.StandardButton.Yes:
+                del self.books[file_path]
+                self.save_library()
+                self.update_book_tree()
 
 def main():
-    app = QApplication(sys.argv)
-    manager = EbookManager()
-    manager.show()
-    sys.exit(app.exec())
-
+        app = QApplication(sys.argv)
+        manager = EbookManager()
+        manager.show()
+        sys.exit(app.exec())
 
 if __name__ == '__main__':
-    main()
+        main()
+
+
+
