@@ -1,16 +1,63 @@
 import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QListWidget, QLineEdit, QPushButton,
-                             QLabel, QFileDialog, QMessageBox, QSplitter,
-                             QTreeWidget, QTreeWidgetItem, QMenu, QTextEdit)
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QIcon, QImage, QPixmap, QAction
+                             QHBoxLayout, QLineEdit, QPushButton, QTreeWidget,
+                             QTreeWidgetItem, QMenu, QDialog, QLabel, QTextEdit,
+                             QScrollArea, QColorDialog, QMessageBox, QSplitter, QFileDialog)
+from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QImage, QAction
 import fitz  # PyMuPDF
 import ebooklib
 from ebooklib import epub
 import json
 import re
+from datetime import datetime
+
+
+class MarkableLabel(QLabel):
+    """可以手写标记的标签"""
+
+    def __init__(self):
+        super().__init__()
+        self.drawing = False
+        self.last_point = None
+        self.marks = []  # 存储标记
+        self.current_color = QColor(Qt.GlobalColor.red)  # 默认红色
+        self.current_width = 2  # 默认线宽
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drawing = True
+            self.last_point = event.pos()
+
+    def mouseMoveEvent(self, event):
+        if self.drawing:
+            current_point = event.pos()
+            self.marks.append({
+                'start': self.last_point,
+                'end': current_point,
+                'color': self.current_color,
+                'width': self.current_width
+            })
+            self.last_point = current_point
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drawing = False
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        for mark in self.marks:
+            pen = QPen(mark['color'], mark['width'])
+            painter.setPen(pen)
+            painter.drawLine(mark['start'], mark['end'])
+
+    def clear_marks(self):
+        """清除所有标记"""
+        self.marks = []
+        self.update()
 
 
 class EbookManager(QMainWindow):
@@ -21,9 +68,12 @@ class EbookManager(QMainWindow):
         self.notes = {}  # 存储笔记信息
         self.current_doc = None  # 当前打开的文档
         self.current_page = 0  # 当前页码
+        self.current_book_path = None  # 当前打开的书籍路径
+        self.page_marks = {}  # 存储每页的标记
         self.init_ui()
         self.load_library()
         self.load_notes()
+        self.load_marks()
 
     def init_ui(self):
         self.setWindowTitle('电子书管理系统')
@@ -64,7 +114,7 @@ class EbookManager(QMainWindow):
         self.book_tree.customContextMenuRequested.connect(self.show_book_menu)
         left_layout.addWidget(self.book_tree)
 
-        # 右侧阅读区域
+        # 右侧面板
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
@@ -78,24 +128,47 @@ class EbookManager(QMainWindow):
         self.next_btn.clicked.connect(self.next_page)
         self.add_note_btn.clicked.connect(self.add_note)
 
+        # 标记工具
+        self.color_btn = QPushButton('标记颜色')
+        self.color_btn.clicked.connect(self.choose_color)
+
+        self.clear_marks_btn = QPushButton('清除标记')
+        self.clear_marks_btn.clicked.connect(self.clear_current_marks)
+
         toolbar.addWidget(self.prev_btn)
         toolbar.addWidget(self.next_btn)
         toolbar.addWidget(self.add_note_btn)
+        toolbar.addWidget(self.color_btn)
+        toolbar.addWidget(self.clear_marks_btn)
 
         right_layout.addLayout(toolbar)
 
-        # 阅读区域
-        self.content_display = QTextEdit()
-        self.content_display.setReadOnly(True)
-        self.content_display.setStyleSheet("""
-            QTextEdit {
-                padding: 20px;
-                background: white;
-                font-size: 16px;
-                line-height: 1.6;
-            }
-        """)
-        right_layout.addWidget(self.content_display)
+        # 创建可标记的阅读区域
+        scroll_area = QScrollArea()
+        self.content_display = MarkableLabel()
+        self.content_display.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        scroll_area.setWidget(self.content_display)
+        scroll_area.setWidgetResizable(True)
+        right_layout.addWidget(scroll_area)
+
+        # 笔记面板
+        self.notes_panel = QWidget()
+        notes_layout = QVBoxLayout(self.notes_panel)
+
+        # 笔记列表
+        self.notes_list = QTreeWidget()
+        self.notes_list.setHeaderLabels(['笔记'])
+        self.notes_list.itemDoubleClicked.connect(self.view_note)
+        notes_layout.addWidget(self.notes_list)
+
+        # 添加到右侧布局
+        right_layout.addWidget(self.notes_panel)
+        self.notes_panel.hide()  # 默认隐藏笔记面板
+
+        # 添加显示/隐藏笔记按钮
+        self.toggle_notes_btn = QPushButton('显示笔记')
+        self.toggle_notes_btn.clicked.connect(self.toggle_notes_panel)
+        toolbar.addWidget(self.toggle_notes_btn)
 
         # 添加到分割器
         splitter.addWidget(left_panel)
@@ -141,6 +214,27 @@ class EbookManager(QMainWindow):
         except FileNotFoundError:
             self.notes = {}
 
+    def load_marks(self):
+        """加载标记"""
+        try:
+            with open('marks.json', 'r', encoding='utf-8') as f:
+                marks_data = json.load(f)
+
+            for key, marks in marks_data.items():
+                self.page_marks[key] = [
+                    {
+                        'start': QPoint(mark['start'][0], mark['start'][1]),
+                        'end': QPoint(mark['end'][0], mark['end'][1]),
+                        'color': QColor(mark['color']),
+                        'width': mark['width']
+                    }
+                    for mark in marks
+                ]
+        except FileNotFoundError:
+            self.page_marks = {}
+        except Exception as e:
+            print(f"加载标记失败: {e}")
+
     def save_library(self):
         """保存书库信息"""
         with open('library.json', 'w', encoding='utf-8') as f:
@@ -150,6 +244,26 @@ class EbookManager(QMainWindow):
         """保存笔记"""
         with open('notes.json', 'w', encoding='utf-8') as f:
             json.dump(self.notes, f, ensure_ascii=False, indent=2)
+
+    def save_marks(self):
+        """保存标记"""
+        try:
+            marks_data = {}
+            for key, marks in self.page_marks.items():
+                marks_data[key] = [
+                    {
+                        'start': (mark['start'].x(), mark['start'].y()),
+                        'end': (mark['end'].x(), mark['end'].y()),
+                        'color': mark['color'].name(),
+                        'width': mark['width']
+                    }
+                    for mark in marks
+                ]
+
+            with open('marks.json', 'w', encoding='utf-8') as f:
+                json.dump(marks_data, f)
+        except Exception as e:
+            print(f"保存标记失败: {e}")
 
     def import_books(self):
         """导入书籍"""
@@ -234,6 +348,7 @@ class EbookManager(QMainWindow):
             return
 
         try:
+            self.current_book_path = file_path
             ext = os.path.splitext(file_path)[1].lower()
             if ext == '.pdf':
                 self.open_pdf(file_path)
@@ -243,6 +358,10 @@ class EbookManager(QMainWindow):
                 self.open_txt(file_path)
             else:
                 QMessageBox.warning(self, '错误', f'不支持的文件格式: {ext}')
+
+            # 更新笔记列表
+            self.update_notes_list()
+
         except Exception as e:
             QMessageBox.warning(self, '错误', f'打开文件失败: {str(e)}')
 
@@ -278,8 +397,22 @@ class EbookManager(QMainWindow):
         if isinstance(self.current_doc, fitz.Document):  # PDF
             if 0 <= self.current_page < len(self.current_doc):
                 page = self.current_doc[self.current_page]
-                text = page.get_text()
-                self.content_display.setText(text)
+                pix = page.get_pixmap()
+                img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
+                pixmap = QPixmap.fromImage(img)
+                self.content_display.setPixmap(pixmap.scaled(
+                    self.content_display.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                ))
+
+                # 加载该页的标记
+                key = f"{self.current_book_path}_{self.current_page}"
+                if key in self.page_marks:
+                    self.content_display.marks = self.page_marks[key]
+                else:
+                    self.content_display.marks = []
+
         elif isinstance(self.current_doc, epub.EpubBook):  # EPUB
             items = list(self.current_doc.get_items_of_type(ebooklib.ITEM_DOCUMENT))
             if 0 <= self.current_page < len(items):
@@ -287,11 +420,26 @@ class EbookManager(QMainWindow):
                 content = content.replace('<p>', '\n').replace('</p>', '\n')
                 content = content.replace('<br>', '\n')
                 content = re.sub('<[^<]+?>', '', content)
-                self.content_display.setText(content)
+
+                # 创建图像以显示文本
+                pixmap = QPixmap(self.content_display.size())
+                pixmap.fill(Qt.GlobalColor.white)
+                painter = QPainter(pixmap)
+                painter.drawText(pixmap.rect(), Qt.TextFlag.TextWordWrap, content)
+                painter.end()
+                self.content_display.setPixmap(pixmap)
+
+                # 加载该页的标记
+                key = f"{self.current_book_path}_{self.current_page}"
+                if key in self.page_marks:
+                    self.content_display.marks = self.page_marks[key]
+                else:
+                    self.content_display.marks = []
 
     def prev_page(self):
         """上一页"""
         if self.current_doc and self.current_page > 0:
+            self.save_current_marks()
             self.current_page -= 1
             self.show_current_page()
 
@@ -300,18 +448,130 @@ class EbookManager(QMainWindow):
         if self.current_doc:
             if isinstance(self.current_doc, fitz.Document):
                 if self.current_page < len(self.current_doc) - 1:
+                    self.save_current_marks()
                     self.current_page += 1
                     self.show_current_page()
             elif isinstance(self.current_doc, epub.EpubBook):
                 items = list(self.current_doc.get_items_of_type(ebooklib.ITEM_DOCUMENT))
                 if self.current_page < len(items) - 1:
+                    self.save_current_marks()
                     self.current_page += 1
                     self.show_current_page()
 
+    def choose_color(self):
+        """选择标记颜色"""
+        color = QColorDialog.getColor(self.content_display.current_color, self)
+        if color.isValid():
+            self.content_display.current_color = color
+
+    def clear_current_marks(self):
+        """清除当前页面的标记"""
+        self.content_display.clear_marks()
+        if self.current_book_path and self.current_page is not None:
+            key = f"{self.current_book_path}_{self.current_page}"
+            if key in self.page_marks:
+                del self.page_marks[key]
+                self.save_marks()
+
+    def save_current_marks(self):
+        """保存当前页面的标记"""
+        if self.current_book_path and self.current_page is not None:
+            key = f"{self.current_book_path}_{self.current_page}"
+            self.page_marks[key] = self.content_display.marks.copy()
+            self.save_marks()
+
     def add_note(self):
         """添加笔记"""
-        # TODO: 实现添加笔记功能
-        pass
+        if not self.current_book_path:
+            QMessageBox.warning(self, '警告', '请先打开一本书！')
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('添加笔记')
+        dialog.setFixedWidth(400)
+
+        layout = QVBoxLayout(dialog)
+
+        # 笔记内容输入
+        note_label = QLabel('笔记内容:')
+        note_edit = QTextEdit()
+        layout.addWidget(note_label)
+        layout.addWidget(note_edit)
+
+        # 按钮
+        button_layout = QHBoxLayout()
+        save_btn = QPushButton('保存')
+        cancel_btn = QPushButton('取消')
+        button_layout.addWidget(save_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        def save_note():
+            content = note_edit.toPlainText()
+            if content:
+                if self.current_book_path not in self.notes:
+                    self.notes[self.current_book_path] = []
+
+                note = {
+                    'content': content,
+                    'page': self.current_page,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+
+                self.notes[self.current_book_path].append(note)
+                self.save_notes()
+                self.update_notes_list()
+                dialog.accept()
+
+        save_btn.clicked.connect(save_note)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        dialog.exec()
+
+    def update_notes_list(self):
+        """更新笔记列表"""
+        self.notes_list.clear()
+        if self.current_book_path and self.current_book_path in self.notes:
+            for note in self.notes[self.current_book_path]:
+                item = QTreeWidgetItem(self.notes_list)
+                item.setText(0, f"第{note['page'] + 1}页 - {note['timestamp']}")
+                item.setData(0, Qt.ItemDataRole.UserRole, note)
+
+    def view_note(self, item):
+        """查看笔记"""
+        note = item.data(0, Qt.ItemDataRole.UserRole)
+        if note:
+            dialog = QDialog(self)
+            dialog.setWindowTitle('查看笔记')
+            dialog.setFixedWidth(400)
+
+            layout = QVBoxLayout(dialog)
+
+            # 笔记信息
+            info_label = QLabel(f"页码：第{note['page'] + 1}页\n时间：{note['timestamp']}")
+            layout.addWidget(info_label)
+
+            # 笔记内容
+            content_edit = QTextEdit()
+            content_edit.setPlainText(note['content'])
+            content_edit.setReadOnly(True)
+            layout.addWidget(content_edit)
+
+            # 关闭按钮
+            close_btn = QPushButton('关闭')
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+
+            dialog.exec()
+
+    def toggle_notes_panel(self):
+        """切换笔记面板显示状态"""
+        if self.notes_panel.isHidden():
+            self.notes_panel.show()
+            self.toggle_notes_btn.setText('隐藏笔记')
+        else:
+            self.notes_panel.hide()
+            self.toggle_notes_btn.setText('显示笔记')
 
     def search_books(self):
         """搜索书籍"""
