@@ -21,17 +21,29 @@ class MarkableLabel(QLabel):
         super().__init__()
         self.drawing = False
         self.last_point = None
-        self.marks = []  # 存储标记
-        self.current_color = QColor(Qt.GlobalColor.red)  # 默认红色
-        self.current_width = 2  # 默认线宽
+        self.marks = []
+        self.current_color = QColor(Qt.GlobalColor.red)
+        self.current_width = 2
+        self.setMouseTracking(False)  # 默认禁用鼠标追踪
+
+    def get_main_window(self):
+        """获取主窗口实例"""
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, EbookManager):
+                return parent
+            parent = parent.parent()
+        return None
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        main_window = self.get_main_window()
+        if event.button() == Qt.MouseButton.LeftButton and main_window and main_window.marking_enabled:
             self.drawing = True
             self.last_point = event.pos()
 
     def mouseMoveEvent(self, event):
-        if self.drawing:
+        main_window = self.get_main_window()
+        if self.drawing and main_window and main_window.marking_enabled:
             current_point = event.pos()
             self.marks.append({
                 'start': self.last_point,
@@ -74,6 +86,7 @@ class EbookManager(QMainWindow):
         self.min_zoom = 0.1  # 最小缩放
         self.max_zoom = 5.0  # 最大缩放
         self.booklist_visible = True  # 书籍列表显示状态
+        self.marking_enabled = False  # 标记状态
         self.init_ui()
         self.load_library()
         self.load_notes()
@@ -83,14 +96,36 @@ class EbookManager(QMainWindow):
         self.setWindowTitle('电子书管理系统')
         self.setGeometry(100, 100, 1200, 800)
 
-        # 主窗口布局
+        # 主窗口布局改为垂直布局
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        layout = QHBoxLayout(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # 添加标题栏
+        self.title_label = QLabel()
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                padding: 2px;
+                line-height: 14px;
+                background: #f5f5f5;
+                border-bottom: 1px solid #ddd;
+            }
+        """)
+        main_layout.addWidget(self.title_label)
+
+        # 内容区域使用水平布局
+        content_widget = QWidget()
+        content_layout = QHBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(content_widget)
 
         # 创建分割器
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(self.splitter)
+        content_layout.addWidget(self.splitter)
 
         # 左侧面板
         self.left_panel = QWidget()
@@ -146,10 +181,6 @@ class EbookManager(QMainWindow):
         self.zoom_out_btn = QPushButton('缩小')
         self.zoom_label = QLabel('100%')
 
-        # 当前书籍名称
-        self.current_book_label = QLabel()
-        self.current_book_label.setStyleSheet("font-weight: bold;")
-
         # 其他按钮
         self.add_note_btn = QPushButton('添加笔记')
         self.color_btn = QPushButton('标记颜色')
@@ -174,7 +205,6 @@ class EbookManager(QMainWindow):
         toolbar.addWidget(self.zoom_out_btn)
         toolbar.addWidget(self.zoom_label)
         toolbar.addWidget(self.zoom_in_btn)
-        toolbar.addWidget(self.current_book_label)
         toolbar.addWidget(self.add_note_btn)
         toolbar.addWidget(self.color_btn)
         toolbar.addWidget(self.clear_marks_btn)
@@ -244,6 +274,24 @@ class EbookManager(QMainWindow):
             self.left_panel.show()
             self.toggle_booklist_btn.setText('隐藏书籍列表')
         self.booklist_visible = not self.booklist_visible
+
+    def choose_color(self):
+        """切换标记状态"""
+        if not self.marking_enabled:
+            # 启用标记
+            color = QColorDialog.getColor(self.content_display.current_color, self)
+            if color.isValid():
+                self.content_display.current_color = color
+                self.marking_enabled = True
+                self.color_btn.setText('取消标记')
+                # 启用标记模式
+                self.content_display.setMouseTracking(True)
+        else:
+            # 禁用标记
+            self.marking_enabled = False
+            self.color_btn.setText('标记颜色')
+            # 禁用标记模式
+            self.content_display.setMouseTracking(False)
 
     def load_library(self):
         """加载书库"""
@@ -397,8 +445,8 @@ class EbookManager(QMainWindow):
 
         try:
             self.current_book_path = file_path
-            # 更新当前书籍名称显示
-            self.current_book_label.setText(f"当前阅读: {item.text(0)}")
+            # 更新标题显示
+            self.title_label.setText(item.text(0))
 
             ext = os.path.splitext(file_path)[1].lower()
             if ext == '.pdf':
@@ -545,12 +593,6 @@ class EbookManager(QMainWindow):
                     QMessageBox.warning(self, '警告', '页码超出范围！')
         except ValueError:
             QMessageBox.warning(self, '警告', '请输入有效的页码！')
-
-    def choose_color(self):
-        """选择标记颜色"""
-        color = QColorDialog.getColor(self.content_display.current_color, self)
-        if color.isValid():
-            self.content_display.current_color = color
 
     def clear_current_marks(self):
         """清除当前页面的标记"""
@@ -740,14 +782,13 @@ class EbookManager(QMainWindow):
                 self.save_library()
                 self.update_book_tree()
 
+
 def main():
-        app = QApplication(sys.argv)
-        manager = EbookManager()
-        manager.show()
-        sys.exit(app.exec())
+    app = QApplication(sys.argv)
+    manager = EbookManager()
+    manager.show()
+    sys.exit(app.exec())
+
 
 if __name__ == '__main__':
-        main()
-
-
-
+    main()
