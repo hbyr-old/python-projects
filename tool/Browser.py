@@ -358,12 +358,10 @@ class SimpleBrowser(QMainWindow):
 
     def edit_bookmark(self, item):
         """编辑收藏"""
-        # 创建编辑对话框
         dialog = QDialog(self)
         dialog.setWindowTitle('编辑收藏')
         dialog.setFixedWidth(400)
 
-        # 创建表单布局
         layout = QVBoxLayout(dialog)
 
         # 名称输入框
@@ -415,18 +413,22 @@ class SimpleBrowser(QMainWindow):
             }
         """)
 
-        # 连接按钮信号
         def save_changes():
-            index = self.bookmark_tree.indexOfTopLevelItem(item)
-            if index >= 0:
-                self.bookmarks[index] = {
-                    'title': name_edit.text(),
-                    'url': url_edit.text()
-                }
-                self.save_bookmarks()
-                self.update_bookmark_tree()
-                dialog.accept()
+            category = item.parent().text(0)
+            old_title = item.text(0)
 
+            # 找到并更新书签
+            for bookmark in self.bookmarks["分类"][category]:
+                if bookmark['title'] == old_title:
+                    bookmark['title'] = name_edit.text()
+                    bookmark['url'] = url_edit.text()
+                    break
+
+            self.save_bookmarks()
+            self.update_bookmark_tree()
+            dialog.accept()
+
+        # 只连接一次信号
         save_btn.clicked.connect(save_changes)
         cancel_btn.clicked.connect(dialog.reject)
 
@@ -435,11 +437,17 @@ class SimpleBrowser(QMainWindow):
 
     def delete_bookmark(self, item):
         """删除收藏"""
-        index = self.bookmark_tree.indexOfTopLevelItem(item)
-        if index >= 0:
-            del self.bookmarks[index]
-            self.save_bookmarks()
-            self.update_bookmark_tree()
+        category = item.parent().text(0)
+        bookmark_title = item.text(0)
+
+        # 从对应分类中删除书签
+        self.bookmarks["分类"][category] = [
+            b for b in self.bookmarks["分类"][category]
+            if b['title'] != bookmark_title
+        ]
+
+        self.save_bookmarks()
+        self.update_bookmark_tree()
 
     def open_bookmark(self, item):
         """打开收藏的网址"""
