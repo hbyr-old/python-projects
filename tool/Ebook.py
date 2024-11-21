@@ -70,6 +70,9 @@ class EbookManager(QMainWindow):
         self.current_page = 0  # 当前页码
         self.current_book_path = None  # 当前打开的书籍路径
         self.page_marks = {}  # 存储每页的标记
+        self.zoom_factor = 1.0  # 缩放因子
+        self.min_zoom = 0.1  # 最小缩放
+        self.max_zoom = 5.0  # 最大缩放
         self.init_ui()
         self.load_library()
         self.load_notes()
@@ -120,23 +123,48 @@ class EbookManager(QMainWindow):
 
         # 工具栏
         toolbar = QHBoxLayout()
+
+        # 页面导航
         self.prev_btn = QPushButton('上一页')
         self.next_btn = QPushButton('下一页')
-        self.add_note_btn = QPushButton('添加笔记')
 
+        # 页码显示和跳转
+        page_nav_layout = QHBoxLayout()
+        self.current_page_label = QLabel('0/0')  # 显示当前页码
+        self.page_input = QLineEdit()
+        self.page_input.setFixedWidth(50)
+        self.page_input.setPlaceholderText('页码')
+        self.goto_btn = QPushButton('跳转')
+
+        # 缩放控制
+        self.zoom_in_btn = QPushButton('放大')
+        self.zoom_out_btn = QPushButton('缩小')
+        self.zoom_label = QLabel('100%')
+
+        # 其他按钮
+        self.add_note_btn = QPushButton('添加笔记')
+        self.color_btn = QPushButton('标记颜色')
+        self.clear_marks_btn = QPushButton('清除标记')
+
+        # 连接信号
         self.prev_btn.clicked.connect(self.prev_page)
         self.next_btn.clicked.connect(self.next_page)
+        self.goto_btn.clicked.connect(self.goto_page)
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
         self.add_note_btn.clicked.connect(self.add_note)
-
-        # 标记工具
-        self.color_btn = QPushButton('标记颜色')
         self.color_btn.clicked.connect(self.choose_color)
-
-        self.clear_marks_btn = QPushButton('清除标记')
         self.clear_marks_btn.clicked.connect(self.clear_current_marks)
 
+        # 添加到工具栏
         toolbar.addWidget(self.prev_btn)
         toolbar.addWidget(self.next_btn)
+        toolbar.addWidget(self.current_page_label)
+        toolbar.addWidget(self.page_input)
+        toolbar.addWidget(self.goto_btn)
+        toolbar.addWidget(self.zoom_out_btn)
+        toolbar.addWidget(self.zoom_label)
+        toolbar.addWidget(self.zoom_in_btn)
         toolbar.addWidget(self.add_note_btn)
         toolbar.addWidget(self.color_btn)
         toolbar.addWidget(self.clear_marks_btn)
@@ -396,17 +424,20 @@ class EbookManager(QMainWindow):
         """显示当前页面"""
         if isinstance(self.current_doc, fitz.Document):  # PDF
             if 0 <= self.current_page < len(self.current_doc):
+                # 更新页码显示
+                self.current_page_label.setText(f"{self.current_page + 1}/{len(self.current_doc)}")
+
+                # 渲染页面
                 page = self.current_doc[self.current_page]
-                pix = page.get_pixmap()
+                zoom_matrix = fitz.Matrix(self.zoom_factor, self.zoom_factor)
+                pix = page.get_pixmap(matrix=zoom_matrix)
+
+                # 转换为QImage并显示
                 img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
                 pixmap = QPixmap.fromImage(img)
-                self.content_display.setPixmap(pixmap.scaled(
-                    self.content_display.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                ))
+                self.content_display.setPixmap(pixmap)
 
-                # 加载该页的标记
+                # 加载标记
                 key = f"{self.current_book_path}_{self.current_page}"
                 if key in self.page_marks:
                     self.content_display.marks = self.page_marks[key]
@@ -429,7 +460,7 @@ class EbookManager(QMainWindow):
                 painter.end()
                 self.content_display.setPixmap(pixmap)
 
-                # 加载该页的标记
+                # 加载标记
                 key = f"{self.current_book_path}_{self.current_page}"
                 if key in self.page_marks:
                     self.content_display.marks = self.page_marks[key]
@@ -457,6 +488,40 @@ class EbookManager(QMainWindow):
                     self.save_current_marks()
                     self.current_page += 1
                     self.show_current_page()
+
+    def zoom_in(self):
+        """放大"""
+        if self.zoom_factor < self.max_zoom:
+            self.zoom_factor *= 1.2
+            self.zoom_factor = min(self.zoom_factor, self.max_zoom)
+            self.update_zoom_label()
+            self.show_current_page()
+
+    def zoom_out(self):
+        """缩小"""
+        if self.zoom_factor > self.min_zoom:
+            self.zoom_factor /= 1.2
+            self.zoom_factor = max(self.zoom_factor, self.min_zoom)
+            self.update_zoom_label()
+            self.show_current_page()
+
+    def update_zoom_label(self):
+        """更新缩放比例显示"""
+        self.zoom_label.setText(f"{int(self.zoom_factor * 100)}%")
+
+    def goto_page(self):
+        """跳转到指定页面"""
+        try:
+            page_num = int(self.page_input.text()) - 1  # 转换为从0开始的索引
+            if isinstance(self.current_doc, fitz.Document):
+                if 0 <= page_num < len(self.current_doc):
+                    self.save_current_marks()
+                    self.current_page = page_num
+                    self.show_current_page()
+                else:
+                    QMessageBox.warning(self, '警告', '页码超出范围！')
+        except ValueError:
+            QMessageBox.warning(self, '警告', '请输入有效的页码！')
 
     def choose_color(self):
         """选择标记颜色"""
