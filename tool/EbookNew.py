@@ -3,9 +3,9 @@ import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLineEdit, QPushButton, QTreeWidget,
                              QTreeWidgetItem, QMenu, QDialog, QLabel, QTextEdit,
-                             QScrollArea, QColorDialog, QMessageBox, QSplitter, QFileDialog, QProgressBar)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QEvent
-from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QImage, QAction
+                             QScrollArea, QColorDialog, QMessageBox, QSplitter, QFileDialog, QProgressBar, QInputDialog)
+from PyQt6.QtCore import Qt, QPoint, QTimer, QEvent, QRect
+from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QImage, QAction, QFont
 import fitz  # PyMuPDF
 import ebooklib
 from ebooklib import epub
@@ -28,6 +28,7 @@ class MarkableLabel(QLabel):
         self.setMouseTracking(False)
         self.page_marks = {}  # 存储所有页面的标记
         self.current_page_key = None
+        self.page_labels = {}  # 存储有页面的标签
 
         # 添加以下代码，使标签可以接收键盘焦点
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -42,6 +43,13 @@ class MarkableLabel(QLabel):
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)  # 启用触摸事件
         self.page_turned = False  # 添加标志，防止连续翻页
 
+        # 添加标签相关属性
+        self.text_labels = []  # 存储标签列表
+        self.adding_label = False  # 是否正在添加标签
+        self.label_text = ""  # 当前标签文本
+        self.label_color = QColor(Qt.GlobalColor.blue)  # 标签颜色
+        self.label_font_size = 12  # 标签字体大小
+
     def mousePressEvent(self, event):
         """处理鼠标按下事件"""
         main_window = self.get_main_window()
@@ -49,11 +57,29 @@ class MarkableLabel(QLabel):
             if main_window and main_window.marking_enabled:
                 self.drawing = True
                 self.last_point = event.pos()
+            elif main_window and main_window.labeling_enabled:  # 添加标签模式
+                pos = event.pos()
+                # 将标签添加到当前页面
+                if self.current_page_key:
+                    if self.current_page_key not in self.page_labels:
+                        self.page_labels[self.current_page_key] = []
+
+                    self.page_labels[self.current_page_key].append({
+                        'text': self.label_text,
+                        'pos': pos,
+                        'color': QColor(self.label_color),
+                        'font_size': self.label_font_size
+                    })
+                    self.update()
+                    self.save_labels()  # 保存标签
+
+                    # 更新标签列表
+                    if main_window:
+                        main_window.update_labels_list()
             else:
-                # 记录鼠标按下的位置，用于滑动检测
                 self.is_dragging = True
                 self.last_x = event.pos().x()
-                self.page_turned = False  # 重置翻页标志
+                self.page_turned = False
 
     def mouseReleaseEvent(self, event):
         """处理鼠标释放事件"""
@@ -100,7 +126,7 @@ class MarkableLabel(QLabel):
             points = event.points()
             if points:
                 self.last_x = points[0].position().x()
-                self.page_turned = False  # 重置翻页标志
+                self.page_turned = False  # 重翻页标志
             return True
 
         elif event.type() == QEvent.Type.TouchUpdate:
@@ -128,12 +154,64 @@ class MarkableLabel(QLabel):
         return super().event(event)
 
     def paintEvent(self, event):
+        """重写绘制事件"""
         super().paintEvent(event)
         painter = QPainter(self)
+
+        # 绘制标记
         for mark in self.marks:
             pen = QPen(mark['color'], mark['width'])
             painter.setPen(pen)
             painter.drawLine(mark['start'], mark['end'])
+
+        # 绘制当前页面的文本标签
+        if self.current_page_key and self.current_page_key in self.page_labels:
+            for label in self.page_labels[self.current_page_key]:
+                # 检查是否是高亮标签
+                is_highlight = (hasattr(self, 'highlight_label') and
+                                self.highlight_label and
+                                self.highlight_label['text'] == label['text'] and
+                                self.highlight_label['pos'] == label['pos'])
+
+                # 设置字体
+                font = painter.font()
+                font.setPointSize(label['font_size'])
+                painter.setFont(font)
+
+                # 计算文本宽度和换行
+                text = label['text']
+                fm = painter.fontMetrics()
+                max_width = 120  # 将最大宽度从65改为120
+
+                # 如果文本宽度超过最大宽度，需要换行
+                if fm.horizontalAdvance(text) > max_width:
+                    # 计算每行大约能容纳的字符数
+                    chars_per_line = max(1, int(max_width / (fm.averageCharWidth() * 1.1)))
+                    # 分割文本
+                    lines = []
+                    for i in range(0, len(text), chars_per_line):
+                        lines.append(text[i:i + chars_per_line])
+                else:
+                    lines = [text]
+
+                # 绘制背景（如果是高亮状态）
+                if is_highlight:
+                    max_line_width = max(fm.horizontalAdvance(line) for line in lines)
+                    bg_height = fm.height() * len(lines) + 4  # 添加一些内边距
+                    painter.fillRect(
+                        QRect(label['pos'].x() - 2,
+                              label['pos'].y() - fm.ascent() - 2,
+                              max_line_width + 4,
+                              bg_height),
+                        QColor(255, 255, 0, 100)  # 半透明黄色背景
+                    )
+
+                # 绘制文本
+                painter.setPen(QPen(label['color']))
+                y = label['pos'].y()
+                for line in lines:
+                    painter.drawText(label['pos'].x(), y, line)
+                    y += fm.height()  # 移动到下一行
 
     def clear_marks(self):
         """清除所有标记"""
@@ -143,19 +221,18 @@ class MarkableLabel(QLabel):
         self.update()
 
     def set_current_page(self, page_key):
-        """设置当前页面，加载对应的标记"""
+        """设置当前页面，加载对应的标记和标签"""
         self.current_page_key = page_key
         self.marks = []
 
+        # 加载标记
         if page_key in self.page_marks:
-            # 创建深拷贝以避免引用问题
-            for mark in self.page_marks[page_key]:
-                self.marks.append({
-                    'start': QPoint(mark['start'].x(), mark['start'].y()),
-                    'end': QPoint(mark['end'].x(), mark['end'].y()),
-                    'color': QColor(mark['color'].name()),
-                    'width': mark['width']
-                })
+            self.marks = self.page_marks[page_key].copy()
+
+        # 确保当前页面的标签列表存在
+        if page_key not in self.page_labels:
+            self.page_labels[page_key] = []
+
         self.update()
 
     def save_current_marks(self):
@@ -222,6 +299,48 @@ class MarkableLabel(QLabel):
             print(f"处理键盘事件时出错: {e}")
             event.ignore()
 
+    def clear_labels(self):
+        """清除当前页面的标签"""
+        if self.current_page_key:
+            if self.current_page_key in self.page_labels:
+                del self.page_labels[self.current_page_key]
+            self.update()
+
+    def save_labels(self):
+        """保存标签到数据库"""
+        try:
+            main_window = self.get_main_window()
+            if main_window and main_window.current_book_path:
+                book_id = main_window.books[main_window.current_book_path]['id']
+
+                # 删除该书籍的所有标签
+                main_window.cursor.execute('DELETE FROM labels WHERE book_id = ?', (book_id,))
+
+                # 保存所有页面的标签
+                for key, labels in self.page_labels.items():
+                    if key.startswith(main_window.current_book_path):
+                        try:
+                            page = int(key.split('_')[-1])
+                            for label in labels:
+                                main_window.cursor.execute(
+                                    '''INSERT INTO labels 
+                                       (book_id, page, text, pos_x, pos_y, color, font_size)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                                    (book_id, page,
+                                     label['text'],
+                                     label['pos'].x(), label['pos'].y(),
+                                     label['color'].name(),
+                                     label['font_size'])
+                                )
+                        except (ValueError, IndexError) as e:
+                            print(f"保存标签时出错: {e}, key: {key}")
+                            continue
+
+                main_window.conn.commit()
+                print("标签已保存到数据库")
+        except Exception as e:
+            print(f"保存标签失败: {e}")
+
 
 class EbookManager(QMainWindow):
     def __init__(self):
@@ -261,6 +380,9 @@ class EbookManager(QMainWindow):
         self.auto_save_timer = QTimer()
         self.auto_save_timer.timeout.connect(self.auto_save_drawings)
 
+        # 标签状态
+        self.labeling_enabled = False  # 添加标签状态
+
     def initial_file_check(self):
         """系统启动时检查文件是否存在"""
         try:
@@ -299,7 +421,7 @@ class EbookManager(QMainWindow):
                 status_label.setText(f"正在检查文件完整性... ({checked_count}/{total_books})")
                 QApplication.processEvents()  # 让界面保持响应
 
-            # 如果有文件不存在，删除相关数据
+            # 如果文件不存在，删除相关数据
             if deleted_paths:
                 for path in deleted_paths:
                     try:
@@ -328,7 +450,7 @@ class EbookManager(QMainWindow):
 
                 # 显示结果
                 QMessageBox.warning(self, "文件检查结果",
-                                    f"检测到 {len(deleted_paths)} 个文件已不存在，相关数据已清理。")
+                                    f"检测到 {len(deleted_paths)} 个文件已不存在，相关数据已处理。")
 
             # 关闭进度对话框
             progress.close()
@@ -339,19 +461,21 @@ class EbookManager(QMainWindow):
             print(f"初始文件检查时出错: {e}")
 
     def init_ui(self):
+        # 修改窗口初始状态
         self.setWindowTitle('晓阅')
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1400, 800)
+        self.showMaximized()  # 默认最大化
 
-        # 主窗口布局
+        # 修改布局为三段式
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         layout = QHBoxLayout(main_widget)
 
-        # 创建分割器
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(self.splitter)
+        # 创建单个分割器
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(self.main_splitter)
 
-        # 左侧面板
+        # 左侧书籍列表面板
         self.left_panel = QWidget()
         left_layout = QVBoxLayout(self.left_panel)
 
@@ -369,7 +493,7 @@ class EbookManager(QMainWindow):
 
         left_layout.addLayout(search_layout)
 
-        # 书籍列
+        # 书籍列表
         self.book_tree = QTreeWidget()
         self.book_tree.setHeaderLabels(['书籍'])
         self.book_tree.itemDoubleClicked.connect(self.on_item_double_clicked)
@@ -377,51 +501,48 @@ class EbookManager(QMainWindow):
         self.book_tree.customContextMenuRequested.connect(self.show_book_menu)
         left_layout.addWidget(self.book_tree)
 
-        # 右侧面板
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
+        # 中间阅读区域
+        center_panel = QWidget()
+        center_layout = QVBoxLayout(center_panel)
 
         # 工具栏
         self.toolbar = QHBoxLayout()
+        self.toolbar.setSpacing(1)  # 设置按钮之间的间距
+        self.toolbar.setContentsMargins(0, 0, 0, 0)  # 移除工具栏边距
 
-        # 显示/隐藏书籍列表按钮
-        self.toggle_booklist_btn = QPushButton('隐藏书籍列表')
-        self.toggle_booklist_btn.clicked.connect(self.toggle_booklist)
-        self.toolbar.addWidget(self.toggle_booklist_btn)
-
-        # 页面导航
+        # 创建所有按钮
+        self.toggle_booklist_btn = QPushButton('隐藏书列')
         self.prev_btn = QPushButton('上一页')
         self.next_btn = QPushButton('下一页')
 
-        # 页码显跳
-        self.current_page_label = QLabel('0/0')  # 显示前页码
+        # 创建页码显示和输入框
+        self.current_page_label = QLabel('0/0')
         self.current_page_label.setFixedWidth(50)
         self.page_input = QLineEdit()
         self.page_input.setFixedWidth(50)
         self.page_input.setPlaceholderText('页码')
         self.goto_btn = QPushButton('跳转')
 
-        # 缩放控制
+        # 创建缩放相关控件
+        self.zoom_label = QLabel('100%')
+        self.zoom_label.setFixedWidth(50)
         self.zoom_in_btn = QPushButton('放大')
         self.zoom_out_btn = QPushButton('缩小')
-        self.zoom_label = QLabel('100%')
-        self.zoom_label.setFixedWidth(40)
 
-        # # 当前书籍名称
-        # self.current_book_label = QLabel()
-        # self.current_book_label.setStyleSheet("font-weight: bold;")
-
-        # 其他按钮
-        self.save_button = QPushButton("保存标记")
-        self.save_button.hide()  # 隐藏
-        self.toolbar.addWidget(self.save_button)
+        # 创建标记相关按钮
+        self.add_note_btn = QPushButton('添加笔记')
         self.color_btn = QPushButton('标记颜色')
         self.clear_marks_btn = QPushButton('清除标记')
-        # 添加保存按到工具栏
-        self.add_note_btn = QPushButton('添加笔记')
+        self.save_button = QPushButton("保存标记")
 
-        # 连接信号
-        self.save_button.clicked.connect(self.save_drawings)
+        # 创建标签相关按钮
+        self.add_label_btn = QPushButton('添加标签')
+        self.label_color_btn = QPushButton('标签颜色')
+        self.clear_labels_btn = QPushButton('清除标签')
+        self.toggle_labels_btn = QPushButton('显示标签')
+
+        # 连接钮信号
+        self.toggle_booklist_btn.clicked.connect(self.toggle_booklist)
         self.prev_btn.clicked.connect(self.prev_page)
         self.next_btn.clicked.connect(self.next_page)
         self.goto_btn.clicked.connect(self.goto_page)
@@ -430,31 +551,111 @@ class EbookManager(QMainWindow):
         self.add_note_btn.clicked.connect(self.add_note)
         self.color_btn.clicked.connect(self.choose_color)
         self.clear_marks_btn.clicked.connect(self.clear_current_marks)
+        self.save_button.clicked.connect(self.save_drawings)
+        self.add_label_btn.clicked.connect(self.toggle_label_mode)
+        self.label_color_btn.clicked.connect(self.choose_label_color)
+        self.clear_labels_btn.clicked.connect(self.clear_current_labels)
+        self.toggle_labels_btn.clicked.connect(self.toggle_labels_panel)
 
-        # 添加到工具栏
-        self.toolbar.addWidget(self.prev_btn)
-        self.toolbar.addWidget(self.next_btn)
-        self.toolbar.addWidget(self.current_page_label)
-        self.toolbar.addWidget(self.page_input)
-        self.toolbar.addWidget(self.goto_btn)
-        self.toolbar.addWidget(self.zoom_out_btn)
-        self.toolbar.addWidget(self.zoom_label)
-        self.toolbar.addWidget(self.zoom_in_btn)
-        # self.toolbar.addWidget(self.current_book_label)
-        self.toolbar.addWidget(self.add_note_btn)
-        self.toolbar.addWidget(self.color_btn)
-        self.toolbar.addWidget(self.clear_marks_btn)
+        # 添加按钮到工具栏（只添加一次）
+        buttons = [
+            self.toggle_booklist_btn,
+            self.prev_btn,
+            self.next_btn,
+            self.current_page_label,
+            self.page_input,
+            self.goto_btn,
+            self.zoom_out_btn,
+            self.zoom_label,
+            self.zoom_in_btn,
+            self.add_note_btn,
+            self.color_btn,
+            self.clear_marks_btn,
+            self.save_button,
+            self.add_label_btn,
+            self.label_color_btn,
+            self.clear_labels_btn,
+            self.toggle_labels_btn
+        ]
 
-        right_layout.addLayout(self.toolbar)
+        # 修改按钮样式，调小字体大小和按钮尺寸
+        button_style = """
+            QPushButton {
+                padding: 4px 8px;  /* 减小内边距 */
+                border: 1px solid #ddd;
+                border-radius: 3px;
+                background: white;
+                min-width: 50px;  /* 减小最小宽度 */
+                max-width: 80px;  /* 减小最大宽度 */
+                margin: 0px;
+                font-size: 14px;  /* 减小按钮字体大小 */
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #f0f0f0;
+            }
+            QLineEdit {
+                padding: 4px;
+                border: 1px solid #ddd;
+                border-radius: 3px;
+                font-size: 14px;  /* 减小输入框字体大小 */
+            }
+            QTreeWidget {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                min-width: 250px;  /* 减小树形列表最小宽度 */
+                font-size: 14px;  /* 减小树形列表字体大小 */
+            }
+            QTreeWidget::item {
+                height: 30px;  /* 减小列表项高度 */
+                font-size: 14px;  /* 减小列表项字体大小 */
+            }
+            QLabel {
+                padding: 2px;
+                font-size: 14px;  /* 减小标签字体大小 */
+            }
+        """
 
-        # 创可标记的阅读区域
+        # 设置全局字体
+        app = QApplication.instance()
+        font = app.font()
+        font.setPointSize(14)  # 减小全局字体大小
+        app.setFont(font)
+
+        # 应用按钮样式并添加到工具栏
+        for button in buttons:
+            if isinstance(button, QPushButton):
+                button.setStyleSheet(button_style)
+            self.toolbar.addWidget(button)
+
+        center_layout.addLayout(self.toolbar)
+
+        # 可标记的阅读区域
         scroll_area = QScrollArea()
         self.content_display = MarkableLabel()
         self.content_display.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.content_display.setFocus()  # 设置初始焦点
         scroll_area.setWidget(self.content_display)
         scroll_area.setWidgetResizable(True)
-        right_layout.addWidget(scroll_area)
+        center_layout.addWidget(scroll_area)
+
+        # 右侧标签列表面板
+        self.right_panel = QWidget()
+        right_layout = QVBoxLayout(self.right_panel)
+
+        # ���签搜索框
+        self.label_search_input = QLineEdit()
+        self.label_search_input.setPlaceholderText('搜索标签...')
+        self.label_search_input.textChanged.connect(self.search_labels)
+        right_layout.addWidget(self.label_search_input)
+
+        # 标签树形列表
+        self.label_tree = QTreeWidget()
+        self.label_tree.setHeaderLabels(['标签'])
+        self.label_tree.itemDoubleClicked.connect(self.goto_label)
+        self.label_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.label_tree.customContextMenuRequested.connect(self.show_label_menu)
+        right_layout.addWidget(self.label_tree)
 
         # 笔记面板
         self.notes_panel = QWidget()
@@ -466,41 +667,50 @@ class EbookManager(QMainWindow):
         self.notes_list.itemDoubleClicked.connect(self.view_note)
         notes_layout.addWidget(self.notes_list)
 
-        # 添加到右侧布局
+        # 将笔记面板添加到右侧布局
         right_layout.addWidget(self.notes_panel)
         self.notes_panel.hide()  # 默认隐藏笔记面板
 
-        # 添加显示/隐藏笔记按钮
-        self.toggle_notes_btn = QPushButton('显示笔记')
-        self.toggle_notes_btn.clicked.connect(self.toggle_notes_panel)
-        self.toolbar.addWidget(self.toggle_notes_btn)
-
         # 添加到分割器
-        self.splitter.addWidget(self.left_panel)
-        self.splitter.addWidget(right_panel)
-        self.splitter.setStretchFactor(1, 2)
+        self.main_splitter.addWidget(self.left_panel)
+        self.main_splitter.addWidget(center_panel)
+        self.main_splitter.addWidget(self.right_panel)
 
-        # 设置样式
-        self.setStyleSheet("""
-            QPushButton {
-                padding: 5px 15px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                background: white;
-            }
-            QPushButton:hover {
-                background: #f0f0f0;
-            }
-            QLineEdit {
-                padding: 5px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-            QTreeWidget {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-        """)
+        # 设置分割器比例
+        self.main_splitter.setStretchFactor(0, 2)  # 书籍列表
+        self.main_splitter.setStretchFactor(1, 4)  # 阅读区域
+        self.main_splitter.setStretchFactor(2, 2)  # 标签列表
+
+        # 设置最小宽度
+        self.left_panel.setMinimumWidth(300)  # 增加书籍列表最小宽度
+        self.right_panel.setMinimumWidth(300)  # 增加标签列表最小宽度
+
+        # 默认隐藏标签列表
+        self.right_panel.hide()
+        self.toggle_labels_btn.setText('显示标签')
+
+        # 设置树形列表标题样式
+        try:
+            self.book_tree.headerItem().setFont(0, QFont('', 16, QFont.Weight.Bold))  # 减小标题字体大小
+            self.label_tree.headerItem().setFont(0, QFont('', 16, QFont.Weight.Bold))
+            self.notes_list.headerItem().setFont(0, QFont('', 16, QFont.Weight.Bold))
+
+            # 设置树形列表项的字体
+            self.book_tree.setStyleSheet("""
+                QTreeWidget::item {
+                    height: 30px;
+                    font-size: 14px;
+                }
+                QTreeWidget::item:has-children {  /* 父节点（格式分类）样式 */
+                    font-size: 16px;
+                    font-weight: bold;
+                    color: #333;
+                    background: #f8f8f8;
+                    padding: 4px;
+                }
+            """)
+        except Exception as e:
+            print(f"设置标题字体时出错: {e}")
 
     def init_database(self):
         """初始化数据库"""
@@ -558,6 +768,21 @@ class EbookManager(QMainWindow):
                 )
             ''')
 
+            # 创建标签表
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS labels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER,
+                    page INTEGER,
+                    text TEXT,
+                    pos_x INTEGER,
+                    pos_y INTEGER,
+                    color TEXT,
+                    font_size INTEGER,
+                    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+                )
+            ''')
+
             # 启用外键约束
             self.cursor.execute('PRAGMA foreign_keys = ON')
 
@@ -566,7 +791,7 @@ class EbookManager(QMainWindow):
             print(f"初始化数据库失败: {e}")
 
     def load_library(self):
-        """从数库加载书库"""
+        """数据库���载书籍"""
         try:
             self.books = {}
             self.cursor.execute('SELECT id, path, title, format, size FROM books')
@@ -586,9 +811,9 @@ class EbookManager(QMainWindow):
     def save_library(self):
         """保存书库数据库"""
         try:
-            # 不再删除所有记录，而是更新现有记录或插入新记录
+            # 不删除所有记录，而更新现有记录或插入新记录
             for path, info in self.books.items():
-                if 'id' in info:  # 如果已有ID，更新记录
+                if 'id' in info:  # 如果已有ID更新记录
                     self.cursor.execute(
                         '''UPDATE books 
                            SET title = ?, format = ?, size = ?
@@ -671,7 +896,7 @@ class EbookManager(QMainWindow):
             if hasattr(self, 'content_display'):
                 self.content_display.page_marks = self.page_marks.copy()
 
-            print("从数据库加载标记完成")
+            print("数据库加载标记完成")
         except Exception as e:
             print(f"从数据库加载标记失败: {e}")
             self.page_marks = {}
@@ -732,7 +957,7 @@ class EbookManager(QMainWindow):
     def closeEvent(self, event):
         """程序关闭时的处理"""
         try:
-            # 保存当前页面的标记到数据库
+            # 保存当前页面标记到数据库
             if self.current_book_path and self.marking_enabled:
                 try:
                     book_id = self.books[self.current_book_path]['id']
@@ -758,10 +983,11 @@ class EbookManager(QMainWindow):
                 except Exception as e:
                     print(f"关闭程序时保存标记失败: {e}")
 
-            # 保存其他数据
+            # 保存其他据
             self.save_library()
             self.save_notes()
             self.save_zoom_states()
+            self.save_labels()  # 保存标签
 
             # 关闭数据库连接
             self.conn.close()
@@ -775,15 +1001,15 @@ class EbookManager(QMainWindow):
         """切换书籍列表显示状态"""
         if self.booklist_visible:
             self.left_panel.hide()
-            self.toggle_booklist_btn.setText('显示书列表')
+            self.toggle_booklist_btn.setText('显示书表')
         else:
             self.left_panel.show()
-            self.toggle_booklist_btn.setText('隐藏书籍列表')
+            self.toggle_booklist_btn.setText('隐藏书列')
         self.booklist_visible = not self.booklist_visible
 
     def import_books(self):
         """导入书籍"""
-        folder = QFileDialog.getExistingDirectory(self, '选择书籍文件夹')
+        folder = QFileDialog.getExistingDirectory(self, '选择书籍文件')
         if folder:
             for root, dirs, files in os.walk(folder):
                 for file in files:
@@ -801,7 +1027,7 @@ class EbookManager(QMainWindow):
                 self.books[file_path] = book_info
                 self.save_library()
         except Exception as e:
-            QMessageBox.warning(self, '错误', f'添加书籍失败: {str(e)}')
+            QMessageBox.warning(self, '错误', f'添加书失败: {str(e)}')
 
     def get_book_info(self, file_path):
         """获取书籍信息"""
@@ -840,7 +1066,7 @@ class EbookManager(QMainWindow):
                 formats[fmt] = []
             formats[fmt].append(book)
 
-        # 添到树形结构
+        # 添加到树形结构
         for fmt, books in formats.items():
             format_item = QTreeWidgetItem(self.book_tree)
             format_item.setText(0, fmt.upper())
@@ -855,47 +1081,25 @@ class EbookManager(QMainWindow):
         if item.parent():  # 确保是书籍项而不是分类项
             self.open_book(item)
 
-    # 修改 open_book 法
+    # 修改 open_book 方法
     def open_book(self, item):
         """打开书籍"""
         if not item.parent():
             return
 
-        # 保存之前书籍的标记到数据库
-        if self.current_book_path and self.marking_enabled:
-            try:
-                # 先删除当前页面的旧标记
-                self.cursor.execute('DELETE FROM marks WHERE book_path = ? AND page = ?',
-                                    (self.current_book_path, self.current_page))
-
-                # 插入新标记
-                for mark in self.content_display.marks:
-                    self.cursor.execute(
-                        '''INSERT INTO marks 
-                           (book_path, page, start_x, start_y, end_x, end_y, color, width)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                        (self.current_book_path, self.current_page,
-                         mark['start'].x(), mark['start'].y(),
-                         mark['end'].x(), mark['end'].y(),
-                         mark['color'].name(), mark['width'])
-                    )
-
-                # 提交事务
-                self.conn.commit()
-                print(f"保存了 {len(self.content_display.marks)} 个标记到数据库")
-            except Exception as e:
-                print(f"保存标记到数据库时出错: {e}")
-
-        # 保存之前书籍的绘图
-        if self.current_book_path and self.marking_enabled:
-            self.save_drawings()
-
-        file_path = item.data(0, Qt.ItemDataRole.UserRole)
-        if not os.path.exists(file_path):
-            QMessageBox.warning(self, '错误', '文件不存在！')
-            return
-
         try:
+            file_path = item.data(0, Qt.ItemDataRole.UserRole)
+            if not os.path.exists(file_path):
+                QMessageBox.warning(self, '错误', '文件不存在！')
+                return
+
+            # 保存之前书籍的标记和绘图
+            if self.current_book_path:
+                if self.marking_enabled:
+                    self.save_drawings()
+                self.save_current_marks()
+
+            # 设置新书籍
             self.current_book_path = file_path
             self.zoom_factor = self.zoom_states.get(file_path, 1.0)
             self.update_zoom_label()
@@ -904,9 +1108,11 @@ class EbookManager(QMainWindow):
             self.content_display.marks = []
             self.current_page = 0  # 重置页码
 
-            # 先加载标记数据
+            # 加载标记数据
             self.load_marks()
+            self.load_labels()
 
+            # 打开文件
             ext = os.path.splitext(file_path)[1].lower()
             if ext == '.pdf':
                 self.open_pdf(file_path)
@@ -918,40 +1124,21 @@ class EbookManager(QMainWindow):
                 QMessageBox.warning(self, '错误', f'不支持的文件格式: {ext}')
                 return
 
-            # 更新窗口标题为书籍名称
+            # 更新窗口标题
             if file_path in self.books:
                 book_title = self.books[file_path]['title']
-                # 设置窗口标题为：电子书管理系统 - 书籍名称
                 self.setWindowTitle(f"晓阅 - 阅我所悦，享受时光 - {book_title}")
 
-            # 加载当前页面的标记
+            # 加载当前页面的标记和标签
             key = f"{file_path}_{self.current_page}"
-            if key in self.page_marks:
-                # 创建深拷贝以避免引用问题
-                self.content_display.marks = []
-                for mark in self.page_marks[key]:
-                    self.content_display.marks.append({
-                        'start': QPoint(mark['start'].x(), mark['start'].y()),
-                        'end': QPoint(mark['end'].x(), mark['end'].y()),
-                        'color': QColor(mark['color'].name()),
-                        'width': mark['width']
-                    })
+            self.content_display.set_current_page(key)
 
-            # 设置当前页面键值
-            self.content_display.current_page_key = key
-
-            # 显示当前页面（包括标记）
-            self.show_current_page()
-
-            # 确保阅读框获得焦点
-            self.content_display.setFocus()
-
-            # 更新笔记列表
-            self.update_notes_list()
+            # 更新标签列表
+            self.update_labels_list()
 
         except Exception as e:
-            QMessageBox.warning(self, '错误', f'打开文件失败: {str(e)}')
-            print(f"打开文件详细错误: {e}")  # 详细错误信息
+            print(f"打开文件详细错误: {e}")
+            QMessageBox.warning(self, "错误", f"打开文件失败: {str(e)}")
 
     def open_pdf(self, file_path):
         """打开PDF文件"""
@@ -966,10 +1153,10 @@ class EbookManager(QMainWindow):
         """打开EPUB文件"""
         try:
             # 显示加载提示
-            self.statusBar().showMessage("正在转换电子书格式...", 2000)
+            self.statusBar().showMessage("正在转电子书格式...", 2000)
             QApplication.processEvents()
 
-            # 创建��时PDF文件路径
+            # 创建时PDF文件路径
             temp_dir = os.path.join(os.path.dirname(__file__), 'temp_pdf')
             os.makedirs(temp_dir, exist_ok=True)
             pdf_path = os.path.join(temp_dir, os.path.basename(file_path) + '.pdf')
@@ -1000,7 +1187,7 @@ class EbookManager(QMainWindow):
 
         except Exception as e:
             QMessageBox.warning(self, '错误', f'打开EPUB失败: {str(e)}')
-            print(f"打开EPUB详细错误: {e}")
+            print(f"打开EPUB细错误: {e}")
 
     def load_epub_pages(self, start_page, count):
         """加载指定范围的页面"""
@@ -1066,7 +1253,7 @@ class EbookManager(QMainWindow):
             self.content_display.clear()
             self.content_display.setPixmap(QPixmap())  # 清除之前的图片
 
-            # 设置基本样式，添加自动换行和宽度限制
+            # 设置基样式，添加动态换行和宽度限制
             styled_content = f"""
                 <html>
                 <head>
@@ -1126,105 +1313,15 @@ class EbookManager(QMainWindow):
                     pixmap = QPixmap.fromImage(img)
                     self.content_display.setPixmap(pixmap)
 
-                    # 加载当前页面的标记
+                    # 设置当前页面键值并加载标记和标签
                     key = f"{self.current_book_path}_{self.current_page}"
-                    print(f"当前页面键值: {key}")
-                    print(f"可用的标记: {self.page_marks.get(key, [])}")
+                    self.content_display.set_current_page(key)
+                    self.load_labels()
 
-                    self.content_display.marks = []
-                    if key in self.page_marks:
-                        for mark in self.page_marks[key]:
-                            new_mark = {
-                                'start': QPoint(mark['start'].x(), mark['start'].y()),
-                                'end': QPoint(mark['end'].x(), mark['end'].y()),
-                                'color': QColor(mark['color'].name()),
-                                'width': mark['width']
-                            }
-                            self.content_display.marks.append(new_mark)
-                        print(f"已加载标记数量: {len(self.content_display.marks)}")
-
-                    self.content_display.current_page_key = key
                     self.content_display.update()
 
-                    # 检查是否需要预加载更多页面
-                    QTimer.singleShot(100, self.check_and_preload)
-
-            elif isinstance(self.current_doc, epub.EpubBook):  # EPUB
-                if 0 <= self.current_page < len(self.epub_items):
-                    # 更新页码显示
-                    self.current_page_label.setText(f"{self.current_page + 1}/{len(self.epub_items)}")
-
-                    # 显示加载提示
-                    self.statusBar().showMessage("正在加载页面...", 1000)
-                    QApplication.processEvents()
-
-                    # 获取内容
-                    content = None
-                    if self.current_page in self.page_cache:
-                        cache_data = self.page_cache[self.current_page]
-                        if not cache_data['processed']:
-                            content = self.process_epub_images(cache_data['content'],
-                                                               self.epub_items[self.current_page])
-                            cache_data['content'] = content
-                            cache_data['processed'] = True
-                        else:
-                            content = cache_data['content']
-
-                    if content is None:
-                        # 如果当前页面未缓存，立即加载
-                        item = self.epub_items[self.current_page]
-                        content = item.get_content().decode('utf-8')
-                        content = self.process_epub_images(content, item)
-
-                    # 设置基本样式
-                    styled_content = f"""
-                        <html>
-                        <head>
-                            <style>
-                                body {{
-                                    font-family: Arial, sans-serif;
-                                    font-size: 14px;
-                                    line-height: 1.6;
-                                    margin: 20px;
-                                    background-color: white;
-                                }}
-                                img {{
-                                    max-width: 100%;
-                                    height: auto;
-                                }}
-                            </style>
-                        </head>
-                        <body>
-                            {content}
-                        </body>
-                        </html>
-                    """
-
-                    self.content_display.setTextFormat(Qt.TextFormat.RichText)
-                    self.content_display.setText(styled_content)
-
-                    # 加载当前页面的标记
-                    key = f"{self.current_book_path}_{self.current_page}"
-                    print(f"当前页面键值: {key}")
-                    print(f"可用的标记: {self.page_marks.get(key, [])}")
-
-                    self.content_display.marks = []
-                    if key in self.page_marks:
-                        for mark in self.page_marks[key]:
-                            new_mark = {
-                                'start': QPoint(mark['start'].x(), mark['start'].y()),
-                                'end': QPoint(mark['end'].x(), mark['end'].y()),
-                                'color': QColor(mark['color'].name()),
-                                'width': mark['width']
-                            }
-                            self.content_display.marks.append(new_mark)
-                        print(f"已加载标记数量: {len(self.content_display.marks)}")
-
-                    self.content_display.current_page_key = key
-                    self.content_display.update()
-
-                    # 检查是否需要预加载更多页面
-                    QTimer.singleShot(100, self.check_and_preload)
+            # 更新标签列表
+            self.update_labels_list()
 
         except Exception as e:
             print(f"显示当前页面时出错: {e}")
@@ -1232,7 +1329,7 @@ class EbookManager(QMainWindow):
     def process_epub_images(self, content, item):
         """处理EPUB中的图片路径"""
         try:
-            # 查是否已经处理过
+            # 检查是否已经处理过
             if hasattr(self, 'processed_images') and item.file_name in self.processed_images:
                 return self.processed_images[item.file_name]
 
@@ -1260,7 +1357,7 @@ class EbookManager(QMainWindow):
                                         f.write(image.content)
                                     break
                                 except Exception as e:
-                                    print(f"保图片失败: {e}")
+                                    print(f"保存图片失败: {e}")
                                     continue
 
                     # 替换图片路径
@@ -1281,7 +1378,7 @@ class EbookManager(QMainWindow):
         """上一页"""
         try:
             if self.current_doc and self.current_page > 0:
-                # 先保存前页面的标记
+                # 先保存当前页面的标记
                 if self.marking_enabled:
                     self.content_display.save_current_marks()
                     QApplication.processEvents()  # 让界面响应
@@ -1375,7 +1472,7 @@ class EbookManager(QMainWindow):
                     self.save_button.show()
                     self.auto_save_timer.start(180000)  # 3分钟
             else:
-                # 禁用标记前先保存
+                # 使用标记前先保存
                 if self.current_book_path:
                     self.save_drawings()
 
@@ -1390,7 +1487,7 @@ class EbookManager(QMainWindow):
             QMessageBox.warning(self, "错误", f"切换标记模式时出错: {str(e)}")
 
     def clear_current_marks(self):
-        """清除当前页面的标记"""
+        """清除当前页的标记"""
         self.content_display.clear_marks()
         if self.current_book_path and self.current_page is not None:
             key = f"{self.current_book_path}_{self.current_page}"
@@ -1399,7 +1496,7 @@ class EbookManager(QMainWindow):
                 self.save_marks()
 
     def save_current_marks(self):
-        """保存当前面的标记"""
+        """保存当前页面的标记"""
         if self.current_book_path and self.current_page is not None:
             key = f"{self.current_book_path}_{self.current_page}"
             self.page_marks[key] = self.content_display.marks.copy()
@@ -1408,7 +1505,7 @@ class EbookManager(QMainWindow):
     def add_note(self):
         """添加笔记"""
         if not self.current_book_path:
-            QMessageBox.warning(self, '警告', '请先打开一本书！')
+            QMessageBox.warning(self, '警告', '请打开一本书！')
             return
 
         dialog = QDialog(self)
@@ -1463,7 +1560,7 @@ class EbookManager(QMainWindow):
                 item.setData(0, Qt.ItemDataRole.UserRole, note)
 
     def view_note(self, item):
-        """查看和编辑记"""
+        """查看和编辑笔记"""
         note = item.data(0, Qt.ItemDataRole.UserRole)
         if note:
             dialog = QDialog(self)
@@ -1490,7 +1587,7 @@ class EbookManager(QMainWindow):
 
             def save_changes():
                 try:
-                    # 找到当前记在列表中的索引
+                    # 找到当前笔记在列表中的索引
                     note_list = self.notes[self.current_book_path]
                     note_index = note_list.index(note)
 
@@ -1501,7 +1598,7 @@ class EbookManager(QMainWindow):
 
                     # 保存到文件
                     self.save_notes()
-                    # 更新列��显示
+                    # 更新列表显示
                     self.update_notes_list()
                     # 显示保存成功提示
                     self.statusBar().showMessage("笔记已保存", 2000)
@@ -1530,7 +1627,7 @@ class EbookManager(QMainWindow):
 
     def delete_note(self, note, dialog):
         """删除笔记"""
-        reply = QMessageBox.question(self, '确认删',
+        reply = QMessageBox.question(self, '确认删除',
                                      '确定要删除这条笔记吗？',
                                      QMessageBox.StandardButton.Yes |
                                      QMessageBox.StandardButton.No)
@@ -1572,7 +1669,7 @@ class EbookManager(QMainWindow):
             format_item.setHidden(not has_visible_children)
 
     def show_book_menu(self, position):
-        """显示书右键菜"""
+        """显示书右键菜单"""
         item = self.book_tree.itemAt(position)
         if not item:
             return
@@ -1672,7 +1769,7 @@ class EbookManager(QMainWindow):
                     print(f"保存了 {len(self.content_display.marks)} 个标记到数据库")
 
         except Exception as e:
-            print(f"保存绘图到数据库时出错: {str(e)}")
+            print(f"保存���图到数据库时出错: {str(e)}")
             QMessageBox.warning(self, "错误", "保存绘图失败")
 
     def load_remaining_items(self):
@@ -1707,6 +1804,291 @@ class EbookManager(QMainWindow):
                 super().keyPressEvent(event)
         except Exception as e:
             print(f"处理键盘事件时出错: {e}")
+
+    def toggle_label_mode(self):
+        """切换标签模式"""
+        try:
+            if not self.labeling_enabled:
+                # 创建自定义对话框
+                dialog = QDialog(self)
+                dialog.setWindowTitle('添加标签')
+                dialog.setFixedSize(300, 200)
+
+                layout = QVBoxLayout(dialog)
+
+                # 使用文本框替代输入框
+                text_edit = QTextEdit()
+                text_edit.setPlaceholderText('请输入标签文本...')
+                text_edit.setAcceptRichText(False)  # 只接受纯文本
+
+                # 设置���动换行
+                text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+
+                # 设置文本框样式
+                text_edit.setStyleSheet("""
+                    QTextEdit {
+                        font-size: 14px;
+                        padding: 5px;
+                        border: 1px solid #ddd;
+                        border-radius: 4px;
+                    }
+                """)
+
+                layout.addWidget(text_edit)
+
+                # 按钮布局
+                button_layout = QHBoxLayout()
+                ok_button = QPushButton('确定')
+                cancel_button = QPushButton('取消')
+
+                button_layout.addWidget(ok_button)
+                button_layout.addWidget(cancel_button)
+                layout.addLayout(button_layout)
+
+                # 处理按钮点击
+                def on_ok():
+                    text = text_edit.toPlainText().strip()
+                    if text:
+                        self.content_display.label_text = text
+                        self.labeling_enabled = True
+                        self.add_label_btn.setText('取消标签')
+                        self.marking_enabled = False  # 关闭标记模式
+                        self.color_btn.setText('标记��色')
+                        dialog.accept()
+
+                def on_cancel():
+                    dialog.reject()
+
+                ok_button.clicked.connect(on_ok)
+                cancel_button.clicked.connect(on_cancel)
+
+                # 显示对话框
+                dialog.exec()
+
+            else:
+                self.labeling_enabled = False
+                self.add_label_btn.setText('添加标签')
+
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"切换标签模式时出错: {str(e)}")
+
+    def choose_label_color(self):
+        """选择标签颜色"""
+        try:
+            color = QColorDialog.getColor(self.content_display.label_color, self)
+            if color.isValid():
+                self.content_display.label_color = color
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"选择标签颜色时出错: {str(e)}")
+
+    def clear_current_labels(self):
+        """清除当前页面的标签"""
+        try:
+            self.content_display.clear_labels()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"清除标签时出错: {str(e)}")
+
+    def load_labels(self):
+        """从数据库加载标签"""
+        try:
+            if self.current_book_path:
+                book_id = self.books[self.current_book_path]['id']
+                self.cursor.execute(
+                    '''SELECT page, text, pos_x, pos_y, color, font_size 
+                       FROM labels 
+                       WHERE book_id = ?''',  # 移除 page 条件，加载所有页面的标签
+                    (book_id,)
+                )
+                labels = self.cursor.fetchall()
+
+                # 清除现有标签
+                self.content_display.page_labels = {}
+
+                # 按页面组织标签
+                for label in labels:
+                    page, text, pos_x, pos_y, color, font_size = label
+                    key = f"{self.current_book_path}_{page}"
+
+                    if key not in self.content_display.page_labels:
+                        self.content_display.page_labels[key] = []
+
+                    self.content_display.page_labels[key].append({
+                        'text': text,
+                        'pos': QPoint(pos_x, pos_y),
+                        'color': QColor(color),
+                        'font_size': font_size
+                    })
+
+                # 更新当前页面的显示
+                self.content_display.update()
+                # 更新标签列表
+                self.update_labels_list()
+
+        except Exception as e:
+            print(f"加载签失败: {e}")
+
+    def toggle_labels_panel(self):
+        """切换标签面板显示状态"""
+        if self.right_panel.isHidden():
+            self.right_panel.show()
+            self.toggle_labels_btn.setText('隐藏标签')
+        else:
+            self.right_panel.hide()
+            self.toggle_labels_btn.setText('显示标签')
+
+    def update_labels_list(self):
+        """更新标签树形列表"""
+        try:
+            self.label_tree.clear()
+
+            if not self.current_book_path:
+                return
+
+            # 按页码分组
+            page_groups = {}
+            if hasattr(self.content_display, 'page_labels'):
+                for key, labels in self.content_display.page_labels.items():
+                    if key.startswith(self.current_book_path):
+                        try:
+                            page = int(key.split('_')[-1])
+                            if page not in page_groups:
+                                page_groups[page] = []
+                            page_groups[page].extend(labels)
+                        except (ValueError, IndexError):
+                            continue
+
+            # 添加到树形结构
+            for page, labels in sorted(page_groups.items()):
+                page_item = QTreeWidgetItem(self.label_tree)
+                page_item.setText(0, f"第 {page + 1} 页")
+
+                for label in labels:
+                    label_item = QTreeWidgetItem(page_item)
+                    label_item.setText(0, label['text'])
+                    label_item.setData(0, Qt.ItemDataRole.UserRole, {
+                        'page': page,
+                        'text': label['text'],
+                        'pos': label['pos'],
+                        'color': label['color'],
+                        'font_size': label['font_size']
+                    })
+        except Exception as e:
+            print(f"更新标签列表时出错: {e}")
+
+    def search_labels(self):
+        """搜索标签"""
+        query = self.label_search_input.text().lower()
+
+        for i in range(self.label_tree.topLevelItemCount()):
+            page_item = self.label_tree.topLevelItem(i)
+            page_item.setHidden(False)
+
+            has_visible_children = False
+            for j in range(page_item.childCount()):
+                label_item = page_item.child(j)
+                label_text = label_item.text(0).lower()
+                label_item.setHidden(query not in label_text)
+                if not label_item.isHidden():
+                    has_visible_children = True
+
+            page_item.setHidden(not has_visible_children)
+
+    def show_label_menu(self, position):
+        """显示标签右键菜单"""
+        item = self.label_tree.itemAt(position)
+        if not item or not item.parent():  # 确保是标签项而不是页码项
+            return
+
+        menu = QMenu()
+
+        edit_action = QAction('编辑', self)
+        edit_action.triggered.connect(lambda: self.edit_label(item))
+        menu.addAction(edit_action)
+
+        delete_action = QAction('删除', self)
+        delete_action.triggered.connect(lambda: self.delete_label(item))
+        menu.addAction(delete_action)
+
+        menu.exec(self.label_tree.viewport().mapToGlobal(position))
+
+    def edit_label(self, item):
+        """编辑标签"""
+        label_data = item.data(0, Qt.ItemDataRole.UserRole)
+        if label_data:
+            text, ok = QInputDialog.getText(self, '编辑标签',
+                                            '修改标签文本:',
+                                            text=label_data['text'])
+            if ok and text:
+                # 更新标签文本
+                key = f"{self.current_book_path}_{label_data['page']}"
+                for label in self.content_display.page_labels[key]:
+                    if (label['pos'] == label_data['pos'] and
+                            label['text'] == label_data['text']):
+                        label['text'] = text
+                        break
+
+                # 更新显示
+                self.update_labels_list()
+                self.content_display.update()
+                self.save_labels()
+
+    def delete_label(self, item):
+        """删除标签"""
+        label_data = item.data(0, Qt.ItemDataRole.UserRole)
+        if label_data:
+            reply = QMessageBox.question(self, '确认删除',
+                                         '确定要删除这个标签吗？',
+                                         QMessageBox.StandardButton.Yes |
+                                         QMessageBox.StandardButton.No)
+
+            if reply == QMessageBox.StandardButton.Yes:
+                key = f"{self.current_book_path}_{label_data['page']}"
+                # 找到并删除标签
+                self.content_display.page_labels[key] = [
+                    label for label in self.content_display.page_labels[key]
+                    if not (label['pos'] == label_data['pos'] and
+                            label['text'] == label_data['text'])
+                ]
+
+                # 如果页面没有标签了，删除整个页面的记录
+                if not self.content_display.page_labels[key]:
+                    del self.content_display.page_labels[key]
+
+                # 更新显示
+                self.update_labels_list()
+                self.content_display.update()
+                self.save_labels()
+
+    def display_current_page(self):
+        """显示当前页面"""
+        # ... 现有的显示代码 ...
+        self.load_labels()  # 加载标签
+
+    def goto_label(self, item):
+        """跳转到标签所在页面"""
+        if not item.parent():  # 如果点击的是页码项
+            page = int(item.text(0).split()[1]) - 1
+            self.current_page = page
+            self.show_current_page()
+        else:  # 如果点击的是标签项
+            label_data = item.data(0, Qt.ItemDataRole.UserRole)
+            if label_data:
+                # 跳转到标签所在页面
+                self.current_page = label_data['page']
+                self.show_current_page()
+
+                # 高亮显示标签（可选）
+                self.content_display.highlight_label = label_data
+                self.content_display.update()
+
+                # 3秒后取消高亮（可选）
+                QTimer.singleShot(3000, lambda: self.clear_highlight())
+
+    def clear_highlight(self):
+        """清除标签高亮"""
+        if hasattr(self.content_display, 'highlight_label'):
+            self.content_display.highlight_label = None
+            self.content_display.update()
 
 
 def main():
