@@ -660,7 +660,7 @@ class EbookManager(QMainWindow):
             os.makedirs(temp_dir, exist_ok=True)
             pdf_path = os.path.join(temp_dir, os.path.basename(file_path) + '.pdf')
 
-            # 如果已经有��换好的PDF，直接打开
+            # 如果已经有换好的PDF，直接打开
             if os.path.exists(pdf_path):
                 self.current_doc = fitz.open(pdf_path)
                 self.current_page = 0
@@ -1128,11 +1128,11 @@ class EbookManager(QMainWindow):
                 item.setData(0, Qt.ItemDataRole.UserRole, note)
 
     def view_note(self, item):
-        """查看笔记"""
+        """查看和编辑笔记"""
         note = item.data(0, Qt.ItemDataRole.UserRole)
         if note:
             dialog = QDialog(self)
-            dialog.setWindowTitle('查看笔记')
+            dialog.setWindowTitle('查看/编辑笔记')
             dialog.setFixedWidth(400)
 
             layout = QVBoxLayout(dialog)
@@ -1141,14 +1141,43 @@ class EbookManager(QMainWindow):
             info_label = QLabel(f"页码：第{note['page'] + 1}页\n时间：{note['timestamp']}")
             layout.addWidget(info_label)
 
-            # 笔记内容
+            # 笔记内容 - 改为可编辑
             content_edit = QTextEdit()
             content_edit.setPlainText(note['content'])
-            content_edit.setReadOnly(True)
+            content_edit.setReadOnly(False)  # 设置为可编辑
             layout.addWidget(content_edit)
 
             # 按钮布局
             button_layout = QHBoxLayout()
+
+            # 保存按钮
+            save_btn = QPushButton('保存修改')
+
+            def save_changes():
+                try:
+                    # 找到当前笔记在列表中的索引
+                    note_list = self.notes[self.current_book_path]
+                    note_index = note_list.index(note)
+
+                    # 更新笔记内容
+                    note_list[note_index]['content'] = content_edit.toPlainText()
+                    # 更新时间戳
+                    note_list[note_index]['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                    # 保存到文件
+                    self.save_notes()
+                    # 更新列表显示
+                    self.update_notes_list()
+                    # 显示保存成功提示
+                    self.statusBar().showMessage("笔记已保存", 2000)
+                    # 关闭对话框
+                    dialog.accept()
+                except Exception as e:
+                    print(f"保存笔记修改时出错: {e}")
+                    QMessageBox.warning(self, "错误", "保存笔记失败")
+
+            save_btn.clicked.connect(save_changes)
+            button_layout.addWidget(save_btn)
 
             # 删除按钮
             delete_btn = QPushButton('删除')
@@ -1260,7 +1289,7 @@ class EbookManager(QMainWindow):
                 current_time = datetime.now()
                 if hasattr(self, 'last_save_time'):
                     time_diff = (current_time - self.last_save_time).total_seconds()
-                    if time_diff < 180:  # 如果距离��次保存不到3分钟，���过
+                    if time_diff < 180:  # 如果距离次保存不到3分钟，过
                         return
 
                 # 获取当前页面的键值
