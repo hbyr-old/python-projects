@@ -3,7 +3,7 @@ import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLineEdit, QPushButton, QTreeWidget,
                              QTreeWidgetItem, QMenu, QDialog, QLabel, QTextEdit,
-                             QScrollArea, QColorDialog, QMessageBox, QSplitter, QFileDialog)
+                             QScrollArea, QColorDialog, QMessageBox, QSplitter, QFileDialog, QProgressBar)
 from PyQt6.QtCore import Qt, QPoint, QTimer
 from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QImage, QAction
 import fitz  # PyMuPDF
@@ -177,6 +177,13 @@ class EbookManager(QMainWindow):
         self.booklist_visible = True  # 书籍列表显示状态
         self.init_ui()
         self.init_database()
+
+        # 创建异步检测定时器
+        self.init_check_timer = QTimer()
+        self.init_check_timer.setSingleShot(True)  # 设置为单次触发
+        self.init_check_timer.timeout.connect(self.initial_file_check)
+
+        # 加载数据并启动检测
         self.load_library()
         self.load_notes()
         self.load_marks()
@@ -185,9 +192,89 @@ class EbookManager(QMainWindow):
         self.zoom_states = {}  # 存储书的缩放状态
         self.load_zoom_states()  # 加载缩放状态
 
+        # 启动初始检测（延迟1秒执行，让界面先加载完成）
+        self.init_check_timer.start(1000)
+
         # 添加自动保存定时器
         self.auto_save_timer = QTimer()
         self.auto_save_timer.timeout.connect(self.auto_save_drawings)
+
+    def initial_file_check(self):
+        """系统启动时检查文件是否存在"""
+        try:
+            deleted_paths = []
+            total_books = len(self.books)
+            checked_count = 0
+
+            # 创建进度对话框
+            progress = QDialog(self)
+            progress.setWindowTitle("检查文件")
+            progress.setFixedSize(300, 100)
+            layout = QVBoxLayout(progress)
+
+            # 添加进度标签
+            status_label = QLabel("正在检查文件完整性...", progress)
+            layout.addWidget(status_label)
+
+            # 添加进度条
+            progress_bar = QProgressBar(progress)
+            progress_bar.setMaximum(total_books)
+            layout.addWidget(progress_bar)
+
+            # 显示对话框（非模态）
+            progress.setModal(False)
+            progress.show()
+
+            # 检查所有书籍文件是否存在
+            for path in list(self.books.keys()):
+                if not os.path.exists(path):
+                    print(f"文件不存在，将删除相关数据: {path}")
+                    deleted_paths.append(path)
+
+                # 更新进度
+                checked_count += 1
+                progress_bar.setValue(checked_count)
+                status_label.setText(f"正在检查文件完整性... ({checked_count}/{total_books})")
+                QApplication.processEvents()  # 让界面保持响应
+
+            # 如果有文件不存在，删除相关数据
+            if deleted_paths:
+                for path in deleted_paths:
+                    try:
+                        # 从数据库中删除书籍（级联删除会自动删除相关数据）
+                        self.cursor.execute('DELETE FROM books WHERE path = ?', (path,))
+
+                        # 从内存中删除
+                        del self.books[path]
+                        if path in self.notes:
+                            del self.notes[path]
+                        for key in list(self.page_marks.keys()):
+                            if key.startswith(path):
+                                del self.page_marks[key]
+                        if path in self.zoom_states:
+                            del self.zoom_states[path]
+
+                    except Exception as e:
+                        print(f"删除不存在文件的数据时出错: {e}")
+
+                # 提交事务
+                self.conn.commit()
+
+                # 更新界面
+                self.update_book_tree()
+                self.update_notes_list()
+
+                # 显示结果
+                QMessageBox.warning(self, "文件检查结果",
+                                    f"检测到 {len(deleted_paths)} 个文件已不存在，相关数据已清理。")
+
+            # 关闭进度对话框
+            progress.close()
+
+            print(f"初始文件检查完成，删除了 {len(deleted_paths)} 个不存在文件的数据")
+
+        except Exception as e:
+            print(f"初始文件检查时出错: {e}")
 
     def init_ui(self):
         self.setWindowTitle('晓阅')
@@ -220,7 +307,7 @@ class EbookManager(QMainWindow):
 
         left_layout.addLayout(search_layout)
 
-        # 书籍列表
+        # 书籍列
         self.book_tree = QTreeWidget()
         self.book_tree.setHeaderLabels(['书籍'])
         self.book_tree.itemDoubleClicked.connect(self.on_item_double_clicked)
@@ -246,6 +333,7 @@ class EbookManager(QMainWindow):
 
         # 页码显跳
         self.current_page_label = QLabel('0/0')  # 显示前页码
+        self.current_page_label.setFixedWidth(50)
         self.page_input = QLineEdit()
         self.page_input.setFixedWidth(50)
         self.page_input.setPlaceholderText('页码')
@@ -255,10 +343,11 @@ class EbookManager(QMainWindow):
         self.zoom_in_btn = QPushButton('放大')
         self.zoom_out_btn = QPushButton('缩小')
         self.zoom_label = QLabel('100%')
+        self.zoom_label.setFixedWidth(40)
 
-        # 当前书籍名称
-        self.current_book_label = QLabel()
-        self.current_book_label.setStyleSheet("font-weight: bold;")
+        # # 当前书籍名称
+        # self.current_book_label = QLabel()
+        # self.current_book_label.setStyleSheet("font-weight: bold;")
 
         # 其他按钮
         self.save_button = QPushButton("保存标记")
@@ -266,7 +355,7 @@ class EbookManager(QMainWindow):
         self.toolbar.addWidget(self.save_button)
         self.color_btn = QPushButton('标记颜色')
         self.clear_marks_btn = QPushButton('清除标记')
-        # 添加保存按钮到工具栏
+        # 添加保存按��到工具栏
         self.add_note_btn = QPushButton('添加笔记')
 
         # 连接信号
@@ -289,14 +378,14 @@ class EbookManager(QMainWindow):
         self.toolbar.addWidget(self.zoom_out_btn)
         self.toolbar.addWidget(self.zoom_label)
         self.toolbar.addWidget(self.zoom_in_btn)
-        self.toolbar.addWidget(self.current_book_label)
+        #self.toolbar.addWidget(self.current_book_label)
         self.toolbar.addWidget(self.add_note_btn)
         self.toolbar.addWidget(self.color_btn)
         self.toolbar.addWidget(self.clear_marks_btn)
 
         right_layout.addLayout(self.toolbar)
 
-        # 创建可标记的阅读区域
+        # 创���可标记的阅读区域
         scroll_area = QScrollArea()
         self.content_display = MarkableLabel()
         self.content_display.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -361,7 +450,8 @@ class EbookManager(QMainWindow):
             # 创建书籍表
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS books (
-                    path TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT UNIQUE,
                     title TEXT,
                     format TEXT,
                     size INTEGER
@@ -372,11 +462,11 @@ class EbookManager(QMainWindow):
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    book_path TEXT,
+                    book_id INTEGER,
                     content TEXT,
                     page INTEGER,
                     timestamp TEXT,
-                    FOREIGN KEY (book_path) REFERENCES books(path)
+                    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
                 )
             ''')
 
@@ -384,7 +474,7 @@ class EbookManager(QMainWindow):
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS marks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    book_path TEXT,
+                    book_id INTEGER,
                     page INTEGER,
                     start_x INTEGER,
                     start_y INTEGER,
@@ -392,31 +482,36 @@ class EbookManager(QMainWindow):
                     end_y INTEGER,
                     color TEXT,
                     width INTEGER,
-                    FOREIGN KEY (book_path) REFERENCES books(path)
+                    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
                 )
             ''')
 
             # 创建缩放状态表
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS zoom_states (
-                    book_path TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER UNIQUE,
                     zoom_factor REAL,
-                    FOREIGN KEY (book_path) REFERENCES books(path)
+                    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
                 )
             ''')
+
+            # 启用外键约束
+            self.cursor.execute('PRAGMA foreign_keys = ON')
 
             self.conn.commit()
         except Exception as e:
             print(f"初始化数据库失败: {e}")
 
     def load_library(self):
-        """从数据库加载书库"""
+        """从数库加载书库"""
         try:
             self.books = {}
-            self.cursor.execute('SELECT * FROM books')
+            self.cursor.execute('SELECT id, path, title, format, size FROM books')
             for row in self.cursor.fetchall():
-                path, title, format_, size = row
+                id_, path, title, format_, size = row
                 self.books[path] = {
+                    'id': id_,
                     'path': path,
                     'title': title,
                     'format': format_,
@@ -427,28 +522,45 @@ class EbookManager(QMainWindow):
             print(f"加载书库失败: {e}")
 
     def save_library(self):
-        """保存书库到数据库"""
+        """保存书库数据库"""
         try:
-            self.cursor.execute('DELETE FROM books')
+            # 不再删除所有记录，而是更新现有记录或插入新记录
             for path, info in self.books.items():
-                self.cursor.execute(
-                    'INSERT INTO books (path, title, format, size) VALUES (?, ?, ?, ?)',
-                    (path, info['title'], info['format'], info['size'])
-                )
+                if 'id' in info:  # 如果已有ID，更新记录
+                    self.cursor.execute(
+                        '''UPDATE books 
+                           SET title = ?, format = ?, size = ?
+                           WHERE id = ?''',
+                        (info['title'], info['format'], info['size'], info['id'])
+                    )
+                else:  # 如果是新记录，插入
+                    self.cursor.execute(
+                        '''INSERT INTO books (path, title, format, size)
+                           VALUES (?, ?, ?, ?)''',
+                        (path, info['title'], info['format'], info['size'])
+                    )
+                    # 获取新插入记录的ID
+                    info['id'] = self.cursor.lastrowid
             self.conn.commit()
         except Exception as e:
-            print(f"保存书库失败: {e}")
+            print(f"存书库失败: {e}")
 
     def load_notes(self):
         """从数据库加载笔记"""
         try:
             self.notes = {}
-            self.cursor.execute('SELECT * FROM notes ORDER BY timestamp')
+            self.cursor.execute('''
+                SELECT n.*, b.path 
+                FROM notes n 
+                JOIN books b ON n.book_id = b.id 
+                ORDER BY n.timestamp
+            ''')
             for row in self.cursor.fetchall():
-                _, book_path, content, page, timestamp = row
+                _, book_id, content, page, timestamp, book_path = row
                 if book_path not in self.notes:
                     self.notes[book_path] = []
                 self.notes[book_path].append({
+                    'book_id': book_id,
                     'content': content,
                     'page': page,
                     'timestamp': timestamp
@@ -461,10 +573,11 @@ class EbookManager(QMainWindow):
         try:
             self.cursor.execute('DELETE FROM notes')
             for book_path, notes in self.notes.items():
+                book_id = self.books[book_path]['id']
                 for note in notes:
                     self.cursor.execute(
-                        'INSERT INTO notes (book_path, content, page, timestamp) VALUES (?, ?, ?, ?)',
-                        (book_path, note['content'], note['page'], note['timestamp'])
+                        'INSERT INTO notes (book_id, content, page, timestamp) VALUES (?, ?, ?, ?)',
+                        (book_id, note['content'], note['page'], note['timestamp'])
                     )
             self.conn.commit()
         except Exception as e:
@@ -474,9 +587,13 @@ class EbookManager(QMainWindow):
         """从数据库加载标记"""
         try:
             self.page_marks = {}
-            self.cursor.execute('SELECT * FROM marks')
+            self.cursor.execute('''
+                SELECT m.*, b.path 
+                FROM marks m 
+                JOIN books b ON m.book_id = b.id
+            ''')
             for row in self.cursor.fetchall():
-                _, book_path, page, start_x, start_y, end_x, end_y, color, width = row
+                _, book_id, page, start_x, start_y, end_x, end_y, color, width, book_path = row
                 key = f"{book_path}_{page}"
                 if key not in self.page_marks:
                     self.page_marks[key] = []
@@ -489,7 +606,6 @@ class EbookManager(QMainWindow):
                 }
                 self.page_marks[key].append(mark_data)
 
-            # 同步到 content_display
             if hasattr(self, 'content_display'):
                 self.content_display.page_marks = self.page_marks.copy()
 
@@ -506,12 +622,13 @@ class EbookManager(QMainWindow):
             self.cursor.execute('DELETE FROM marks')
             for key, marks in self.page_marks.items():
                 book_path, page = key.rsplit('_', 1)
+                book_id = self.books[book_path]['id']
                 for mark in marks:
                     self.cursor.execute(
                         '''INSERT INTO marks 
-                           (book_path, page, start_x, start_y, end_x, end_y, color, width)
+                           (book_id, page, start_x, start_y, end_x, end_y, color, width)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                        (book_path, int(page),
+                        (book_id, int(page),
                          mark['start'].x(), mark['start'].y(),
                          mark['end'].x(), mark['end'].y(),
                          mark['color'].name(), mark['width'])
@@ -525,9 +642,13 @@ class EbookManager(QMainWindow):
         """从数据库加载缩放状态"""
         try:
             self.zoom_states = {}
-            self.cursor.execute('SELECT * FROM zoom_states')
+            self.cursor.execute('''
+                SELECT z.*, b.path 
+                FROM zoom_states z 
+                JOIN books b ON z.book_id = b.id
+            ''')
             for row in self.cursor.fetchall():
-                book_path, zoom_factor = row
+                _, book_id, zoom_factor, book_path = row
                 self.zoom_states[book_path] = zoom_factor
         except Exception as e:
             print(f"加载缩放状态失败: {e}")
@@ -537,9 +658,10 @@ class EbookManager(QMainWindow):
         try:
             self.cursor.execute('DELETE FROM zoom_states')
             for book_path, zoom_factor in self.zoom_states.items():
+                book_id = self.books[book_path]['id']
                 self.cursor.execute(
-                    'INSERT INTO zoom_states (book_path, zoom_factor) VALUES (?, ?)',
-                    (book_path, zoom_factor)
+                    'INSERT INTO zoom_states (book_id, zoom_factor) VALUES (?, ?)',
+                    (book_id, zoom_factor)
                 )
             self.conn.commit()
         except Exception as e:
@@ -551,17 +673,18 @@ class EbookManager(QMainWindow):
             # 保存当前页面的标记到数据库
             if self.current_book_path and self.marking_enabled:
                 try:
+                    book_id = self.books[self.current_book_path]['id']
                     # 先删除当前页面的标记
-                    self.cursor.execute('DELETE FROM marks WHERE book_path = ? AND page = ?',
-                                        (self.current_book_path, self.current_page))
+                    self.cursor.execute('DELETE FROM marks WHERE book_id = ? AND page = ?',
+                                        (book_id, self.current_page))
 
                     # 插入新标记
                     for mark in self.content_display.marks:
                         self.cursor.execute(
                             '''INSERT INTO marks 
-                               (book_path, page, start_x, start_y, end_x, end_y, color, width)
+                               (book_id, page, start_x, start_y, end_x, end_y, color, width)
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                            (self.current_book_path, self.current_page,
+                            (book_id, self.current_page,
                              mark['start'].x(), mark['start'].y(),
                              mark['end'].x(), mark['end'].y(),
                              mark['color'].name(), mark['width'])
@@ -881,23 +1004,29 @@ class EbookManager(QMainWindow):
             self.content_display.clear()
             self.content_display.setPixmap(QPixmap())  # 清除之前的图片
 
-            # 设置基本样式
+            # 设置基本样式，添加自动换行和宽度限制
             styled_content = f"""
                 <html>
                 <head>
                     <style>
                         body {{
                             font-family: Arial, sans-serif;
-                            font-size: 14px;
+                            font-size: 20px;
                             line-height: 1.6;
                             margin: 20px;
                             background-color: white;
                             white-space: pre-wrap;
+                            word-wrap: break-word;
+                            max-width: 95%;
+                        }}
+                        p {{
+                            margin: 0;
+                            text-align: justify;
                         }}
                     </style>
                 </head>
                 <body>
-                    {content}
+                    <p>{content}</p>
                 </body>
                 </html>
             """
@@ -905,13 +1034,10 @@ class EbookManager(QMainWindow):
             # 设置为富文本格式显示
             self.content_display.setTextFormat(Qt.TextFormat.RichText)
             self.content_display.setText(styled_content)
+            self.content_display.setWordWrap(True)  # 启用自动换行
 
             # 更新页码显示（txt文件只有一页）
             self.current_page_label.setText("1/1")
-
-            # 更新当前书籍标签
-            if self.current_book_path in self.books:
-                self.current_book_label.setText(self.books[self.current_book_path]['title'])
 
             print(f"成功打开TXT文件: {file_path}")
 
@@ -1275,7 +1401,7 @@ class EbookManager(QMainWindow):
                 item.setData(0, Qt.ItemDataRole.UserRole, note)
 
     def view_note(self, item):
-        """查看和编辑��记"""
+        """查看和编辑记"""
         note = item.data(0, Qt.ItemDataRole.UserRole)
         if note:
             dialog = QDialog(self)
@@ -1348,7 +1474,7 @@ class EbookManager(QMainWindow):
                                      QMessageBox.StandardButton.No)
 
         if reply == QMessageBox.StandardButton.Yes:
-            # 从笔记��表中删除
+            # 从笔记表中删除
             self.notes[self.current_book_path].remove(note)
             if not self.notes[self.current_book_path]:
                 del self.notes[self.current_book_path]
@@ -1410,24 +1536,27 @@ class EbookManager(QMainWindow):
                                      QMessageBox.StandardButton.Yes |
                                      QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            # 从书籍列表中删除
-            del self.books[file_path]
-            # 从笔记中删除
-            if file_path in self.notes:
-                del self.notes[file_path]
-            # 从标记中删除
-            for key in list(self.page_marks.keys()):
-                if key.startswith(file_path):
-                    del self.page_marks[key]
+            try:
+                # 删除书籍（级联删除会自动删除相关的笔记、标记和缩放状态）
+                self.cursor.execute('DELETE FROM books WHERE path = ?', (file_path,))
+                self.conn.commit()
 
-            # 保存更改
-            self.save_library()
-            self.save_notes()
-            self.save_marks()
+                # 从内存中删除
+                del self.books[file_path]
+                if file_path in self.notes:
+                    del self.notes[file_path]
+                for key in list(self.page_marks.keys()):
+                    if key.startswith(file_path):
+                        del self.page_marks[key]
+                if file_path in self.zoom_states:
+                    del self.zoom_states[file_path]
 
-            # 更新界面
-            self.update_book_tree()
-            self.update_notes_list()
+                # 更新界面
+                self.update_book_tree()
+                self.update_notes_list()
+            except Exception as e:
+                print(f"删除书籍失败: {e}")
+                QMessageBox.warning(self, "错误", "删除书籍失败")
 
     def auto_save_drawings(self):
         """自动保存手写绘图"""
@@ -1436,27 +1565,13 @@ class EbookManager(QMainWindow):
                 current_time = datetime.now()
                 if hasattr(self, 'last_save_time'):
                     time_diff = (current_time - self.last_save_time).total_seconds()
-                    if time_diff < 180:  # 如果距离次保存不到3分钟，过
+                    if time_diff < 180:  # 如果距离上次保存不到3分钟，跳过
                         return
 
-                # 获取当前页面的键值
-                key = f"{self.current_book_path}_{self.current_page}"
-
-                # 保存当前页面的标记到 page_marks
-                if self.content_display.marks:  # 如果有标记
-                    self.page_marks[key] = []
-                    for mark in self.content_display.marks:
-                        self.page_marks[key].append({
-                            'start': QPoint(mark['start'].x(), mark['start'].y()),
-                            'end': QPoint(mark['end'].x(), mark['end'].y()),
-                            'color': QColor(mark['color'].name()),
-                            'width': mark['width']
-                        })
-
-                # 保存到文件
-                self.save_marks()
+                # 调用保存方法
+                self.save_drawings()
                 self.last_save_time = current_time
-                print(f"自动保存了 {len(self.content_display.marks)} 个标记到 {key}")
+
         except Exception as e:
             print(f"自动保存绘图失败: {e}")
 
@@ -1464,22 +1579,20 @@ class EbookManager(QMainWindow):
         """手动保存手写绘图"""
         try:
             if self.current_book_path and self.marking_enabled:
-                # 获取当前页面的键值
-                key = f"{self.current_book_path}_{self.current_page}"
+                book_id = self.books[self.current_book_path]['id']
 
-                # 保存当前页面的标记到数据库
+                # 先删除当前页面的标记
+                self.cursor.execute('DELETE FROM marks WHERE book_id = ? AND page = ?',
+                                    (book_id, self.current_page))
+
+                # 插入新标记
                 if self.content_display.marks:  # 如果有标记
-                    # 先删除当前页面的旧标记
-                    self.cursor.execute('DELETE FROM marks WHERE book_path = ? AND page = ?',
-                                        (self.current_book_path, self.current_page))
-
-                    # 插入新标记
                     for mark in self.content_display.marks:
                         self.cursor.execute(
                             '''INSERT INTO marks 
-                               (book_path, page, start_x, start_y, end_x, end_y, color, width)
+                               (book_id, page, start_x, start_y, end_x, end_y, color, width)
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                            (self.current_book_path, self.current_page,
+                            (book_id, self.current_page,
                              mark['start'].x(), mark['start'].y(),
                              mark['end'].x(), mark['end'].y(),
                              mark['color'].name(), mark['width'])
@@ -1489,6 +1602,7 @@ class EbookManager(QMainWindow):
                     self.conn.commit()
 
                     # 更新内存中的标记
+                    key = f"{self.current_book_path}_{self.current_page}"
                     self.page_marks[key] = self.content_display.marks.copy()
 
                     # 显示临时提示
