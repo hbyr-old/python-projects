@@ -488,6 +488,7 @@ class EbookManager(QMainWindow):
 
         # 导入按钮
         import_btn = QPushButton('导入书籍')
+        import_btn.setStyleSheet("font-size: 14px;")  # 设置字体大小为 20px
         import_btn.clicked.connect(self.import_books)
         search_layout.addWidget(import_btn)
 
@@ -495,6 +496,7 @@ class EbookManager(QMainWindow):
 
         # 书籍列表
         self.book_tree = QTreeWidget()
+        self.book_tree.setStyleSheet("QTreeWidget { font-size: 10px; }")  # 设置字体大小
         self.book_tree.setHeaderLabels(['书籍'])
         self.book_tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.book_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -646,6 +648,7 @@ class EbookManager(QMainWindow):
         # ���签搜索框
         self.label_search_input = QLineEdit()
         self.label_search_input.setPlaceholderText('搜索标签...')
+        self.label_search_input.setStyleSheet("font-size: 14px;")  # 设置字体大小为 20px
         self.label_search_input.textChanged.connect(self.search_labels)
         right_layout.addWidget(self.label_search_input)
 
