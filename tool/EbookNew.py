@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLineEdit, QPushButton, QTreeWidget,
                              QTreeWidgetItem, QMenu, QDialog, QLabel, QTextEdit,
                              QScrollArea, QColorDialog, QMessageBox, QSplitter, QFileDialog, QProgressBar)
-from PyQt6.QtCore import Qt, QPoint, QTimer
+from PyQt6.QtCore import Qt, QPoint, QTimer, QEvent
 from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QImage, QAction
 import fitz  # PyMuPDF
 import ebooklib
@@ -35,15 +35,43 @@ class MarkableLabel(QLabel):
         # 添加以下代码，设置滚动步长
         self.scroll_step = 50  # 每次滚动的像素值
 
+        # 添加触摸和鼠标滑动相关的属性
+        self.last_x = None
+        self.is_dragging = False
+        self.drag_threshold = 100  # 滑动触发阈值
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)  # 启用触摸事件
+        self.page_turned = False  # 添加标志，防止连续翻页
+
     def mousePressEvent(self, event):
+        """处理鼠标按下事件"""
         main_window = self.get_main_window()
-        if event.button() == Qt.MouseButton.LeftButton and main_window and main_window.marking_enabled:
-            self.drawing = True
-            self.last_point = event.pos()
+        if event.button() == Qt.MouseButton.LeftButton:
+            if main_window and main_window.marking_enabled:
+                self.drawing = True
+                self.last_point = event.pos()
+            else:
+                # 记录鼠标按下的位置，用于滑动检测
+                self.is_dragging = True
+                self.last_x = event.pos().x()
+                self.page_turned = False  # 重置翻页标志
+
+    def mouseReleaseEvent(self, event):
+        """处理鼠标释放事件"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.drawing:
+                self.drawing = False
+                self.save_current_marks()
+            self.is_dragging = False
+            self.last_x = None
+            self.page_turned = False  # 重置翻页标志
 
     def mouseMoveEvent(self, event):
+        """处理鼠标移动事件"""
         main_window = self.get_main_window()
-        if self.drawing and main_window and main_window.marking_enabled:
+        if not main_window:
+            return
+
+        if self.drawing and main_window.marking_enabled:
             current_point = event.pos()
             mark = {
                 'start': QPoint(self.last_point.x(), self.last_point.y()),
@@ -54,16 +82,50 @@ class MarkableLabel(QLabel):
             self.marks.append(mark)
             self.last_point = current_point
             self.update()
-            # 立即保存标记到当前页面
-            if self.current_page_key:
-                self.page_marks[self.current_page_key] = self.marks.copy()
-                main_window.save_marks()  # 立即保存到文件
+        elif self.is_dragging and self.last_x is not None and not self.page_turned:
+            # 处理滑动翻页
+            delta_x = event.pos().x() - self.last_x
+            if abs(delta_x) > self.drag_threshold:
+                if delta_x > 0:  # 向右滑动
+                    main_window.prev_page()
+                else:  # 向左滑动
+                    main_window.next_page()
+                self.page_turned = True  # 设置翻页标志
+                self.last_x = event.pos().x()
 
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drawing = False
-            # 保存标记
-            self.save_current_marks()
+    def event(self, event):
+        """处理触摸事件"""
+        if event.type() == QEvent.Type.TouchBegin:
+            # 记录触摸开始点
+            points = event.points()
+            if points:
+                self.last_x = points[0].position().x()
+                self.page_turned = False  # 重置翻页标志
+            return True
+
+        elif event.type() == QEvent.Type.TouchUpdate:
+            points = event.points()
+            if len(points) == 2 and not self.page_turned:  # 双指触控且未翻页
+                touch_point = points[0]
+                if self.last_x is not None:
+                    delta_x = touch_point.position().x() - self.last_x
+                    if abs(delta_x) > self.drag_threshold:
+                        main_window = self.get_main_window()
+                        if main_window:
+                            if delta_x > 0:  # 向右滑动
+                                main_window.prev_page()
+                            else:  # 向左滑动
+                                main_window.next_page()
+                            self.page_turned = True  # 设置翻页标志
+                            self.last_x = touch_point.position().x()
+            return True
+
+        elif event.type() == QEvent.Type.TouchEnd:
+            self.last_x = None
+            self.page_turned = False  # 重置翻页标志
+            return True
+
+        return super().event(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -355,7 +417,7 @@ class EbookManager(QMainWindow):
         self.toolbar.addWidget(self.save_button)
         self.color_btn = QPushButton('标记颜色')
         self.clear_marks_btn = QPushButton('清除标记')
-        # 添加保存按��到工具栏
+        # 添加保存按到工具栏
         self.add_note_btn = QPushButton('添加笔记')
 
         # 连接信号
@@ -378,14 +440,14 @@ class EbookManager(QMainWindow):
         self.toolbar.addWidget(self.zoom_out_btn)
         self.toolbar.addWidget(self.zoom_label)
         self.toolbar.addWidget(self.zoom_in_btn)
-        #self.toolbar.addWidget(self.current_book_label)
+        # self.toolbar.addWidget(self.current_book_label)
         self.toolbar.addWidget(self.add_note_btn)
         self.toolbar.addWidget(self.color_btn)
         self.toolbar.addWidget(self.clear_marks_btn)
 
         right_layout.addLayout(self.toolbar)
 
-        # 创���可标记的阅读区域
+        # 创可标记的阅读区域
         scroll_area = QScrollArea()
         self.content_display = MarkableLabel()
         self.content_display.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -674,7 +736,7 @@ class EbookManager(QMainWindow):
             if self.current_book_path and self.marking_enabled:
                 try:
                     book_id = self.books[self.current_book_path]['id']
-                    # 先删除当前页面的标记
+                    # 先删除当前页面的旧标记
                     self.cursor.execute('DELETE FROM marks WHERE book_id = ? AND page = ?',
                                         (book_id, self.current_page))
 
@@ -907,7 +969,7 @@ class EbookManager(QMainWindow):
             self.statusBar().showMessage("正在转换电子书格式...", 2000)
             QApplication.processEvents()
 
-            # 创建临时PDF文件路径
+            # 创建��时PDF文件路径
             temp_dir = os.path.join(os.path.dirname(__file__), 'temp_pdf')
             os.makedirs(temp_dir, exist_ok=True)
             pdf_path = os.path.join(temp_dir, os.path.basename(file_path) + '.pdf')
@@ -1439,7 +1501,7 @@ class EbookManager(QMainWindow):
 
                     # 保存到文件
                     self.save_notes()
-                    # 更新列表显示
+                    # 更新列��显示
                     self.update_notes_list()
                     # 显示保存成功提示
                     self.statusBar().showMessage("笔记已保存", 2000)
