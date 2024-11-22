@@ -9,7 +9,6 @@ from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QImage, QAction
 import fitz  # PyMuPDF
 import ebooklib
 from ebooklib import epub
-import json
 import re
 from datetime import datetime
 import sqlite3
@@ -165,7 +164,7 @@ class MarkableLabel(QLabel):
 class EbookManager(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.supported_formats = ['.epub', '.pdf', '.mobi', '.txt']
+        self.supported_formats = ['.epub', '.pdf', '.txt']
         self.books = {}  # 存储书籍信息
         self.notes = {}  # 存储笔记信息
         self.current_doc = None  # 当前打开的文档
@@ -246,7 +245,7 @@ class EbookManager(QMainWindow):
         self.next_btn = QPushButton('下一页')
 
         # 页码显跳
-        self.current_page_label = QLabel('0/0')  # 显示当前页码
+        self.current_page_label = QLabel('0/0')  # 显示前页码
         self.page_input = QLineEdit()
         self.page_input.setFixedWidth(50)
         self.page_input.setPlaceholderText('页码')
@@ -549,13 +548,34 @@ class EbookManager(QMainWindow):
     def closeEvent(self, event):
         """程序关闭时的处理"""
         try:
-            # 保存所有数据
+            # 保存当前页面的标记到数据库
             if self.current_book_path and self.marking_enabled:
-                self.save_drawings()
+                try:
+                    # 先删除当前页面的标记
+                    self.cursor.execute('DELETE FROM marks WHERE book_path = ? AND page = ?',
+                                        (self.current_book_path, self.current_page))
 
+                    # 插入新标记
+                    for mark in self.content_display.marks:
+                        self.cursor.execute(
+                            '''INSERT INTO marks 
+                               (book_path, page, start_x, start_y, end_x, end_y, color, width)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                            (self.current_book_path, self.current_page,
+                             mark['start'].x(), mark['start'].y(),
+                             mark['end'].x(), mark['end'].y(),
+                             mark['color'].name(), mark['width'])
+                        )
+
+                    # 提交事务
+                    self.conn.commit()
+                    print("关闭程序前保存标记到数据库完成")
+                except Exception as e:
+                    print(f"关闭程序时保存标记失败: {e}")
+
+            # 保存其他数据
             self.save_library()
             self.save_notes()
-            self.save_marks()
             self.save_zoom_states()
 
             # 关闭数据库连接
@@ -635,7 +655,7 @@ class EbookManager(QMainWindow):
                 formats[fmt] = []
             formats[fmt].append(book)
 
-        # 添加到树形结构
+        # 添到树形结构
         for fmt, books in formats.items():
             format_item = QTreeWidgetItem(self.book_tree)
             format_item.setText(0, fmt.upper())
@@ -655,6 +675,31 @@ class EbookManager(QMainWindow):
         """打开书籍"""
         if not item.parent():
             return
+
+        # 保存之前书籍的标记到数据库
+        if self.current_book_path and self.marking_enabled:
+            try:
+                # 先删除当前页面的旧标记
+                self.cursor.execute('DELETE FROM marks WHERE book_path = ? AND page = ?',
+                                    (self.current_book_path, self.current_page))
+
+                # 插入新标记
+                for mark in self.content_display.marks:
+                    self.cursor.execute(
+                        '''INSERT INTO marks 
+                           (book_path, page, start_x, start_y, end_x, end_y, color, width)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (self.current_book_path, self.current_page,
+                         mark['start'].x(), mark['start'].y(),
+                         mark['end'].x(), mark['end'].y(),
+                         mark['color'].name(), mark['width'])
+                    )
+
+                # 提交事务
+                self.conn.commit()
+                print(f"保存了 {len(self.content_display.marks)} 个标记到数据库")
+            except Exception as e:
+                print(f"保存标记到数据库时出错: {e}")
 
         # 保存之前书籍的绘图
         if self.current_book_path and self.marking_enabled:
@@ -813,11 +858,67 @@ class EbookManager(QMainWindow):
     def open_txt(self, file_path):
         """打开TXT文件"""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            self.content_display.setText(content)
+            # 清理之前的文档状态
+            self.current_doc = None
+            self.current_page = 0
+
+            # 尝试不同的编码方式打开文件
+            encodings = ['utf-8', 'gbk', 'gb2312', 'ansi']
+            content = None
+
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    break  # 如果成功读取，跳出循环
+                except UnicodeDecodeError:
+                    continue
+
+            if content is None:
+                raise Exception("无法识别文件编码")
+
+            # 清除之前的图片显示
+            self.content_display.clear()
+            self.content_display.setPixmap(QPixmap())  # 清除之前的图片
+
+            # 设置基本样式
+            styled_content = f"""
+                <html>
+                <head>
+                    <style>
+                        body {{
+                            font-family: Arial, sans-serif;
+                            font-size: 14px;
+                            line-height: 1.6;
+                            margin: 20px;
+                            background-color: white;
+                            white-space: pre-wrap;
+                        }}
+                    </style>
+                </head>
+                <body>
+                    {content}
+                </body>
+                </html>
+            """
+
+            # 设置为富文本格式显示
+            self.content_display.setTextFormat(Qt.TextFormat.RichText)
+            self.content_display.setText(styled_content)
+
+            # 更新页码显示（txt文件只有一页）
+            self.current_page_label.setText("1/1")
+
+            # 更新当前书籍标签
+            if self.current_book_path in self.books:
+                self.current_book_label.setText(self.books[self.current_book_path]['title'])
+
+            print(f"成功打开TXT文件: {file_path}")
+
         except Exception as e:
-            QMessageBox.warning(self, '错误', f'打开TXT失败: {str(e)}')
+            error_msg = f"打开TXT文件失败: {str(e)}"
+            QMessageBox.warning(self, '错误', error_msg)
+            print(error_msg)
 
     def show_current_page(self):
         """显示当前页面"""
@@ -1116,26 +1217,6 @@ class EbookManager(QMainWindow):
             self.page_marks[key] = self.content_display.marks.copy()
             self.save_marks()
 
-    def save_marks(self):
-        """保存标记"""
-        try:
-            marks_data = {}
-            for key, marks in self.page_marks.items():
-                marks_data[key] = [
-                    {
-                        'start': (mark['start'].x(), mark['start'].y()),
-                        'end': (mark['end'].x(), mark['end'].y()),
-                        'color': mark['color'].name(),
-                        'width': mark['width']
-                    }
-                    for mark in marks
-                ]
-
-            with open('marks.json', 'w', encoding='utf-8') as f:
-                json.dump(marks_data, f)
-        except Exception as e:
-            print(f"保存标记失败: {e}")
-
     def add_note(self):
         """添加笔记"""
         if not self.current_book_path:
@@ -1194,7 +1275,7 @@ class EbookManager(QMainWindow):
                 item.setData(0, Qt.ItemDataRole.UserRole, note)
 
     def view_note(self, item):
-        """查看和编辑笔记"""
+        """查看和编辑��记"""
         note = item.data(0, Qt.ItemDataRole.UserRole)
         if note:
             dialog = QDialog(self)
@@ -1221,7 +1302,7 @@ class EbookManager(QMainWindow):
 
             def save_changes():
                 try:
-                    # 找到当前���记在列表中的索引
+                    # 找到当前记在列表中的索引
                     note_list = self.notes[self.current_book_path]
                     note_index = note_list.index(note)
 
@@ -1267,7 +1348,7 @@ class EbookManager(QMainWindow):
                                      QMessageBox.StandardButton.No)
 
         if reply == QMessageBox.StandardButton.Yes:
-            # 从笔记列表中删除
+            # 从笔记��表中删除
             self.notes[self.current_book_path].remove(note)
             if not self.notes[self.current_book_path]:
                 del self.notes[self.current_book_path]
