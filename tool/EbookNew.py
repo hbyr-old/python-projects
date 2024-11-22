@@ -463,8 +463,7 @@ class EbookManager(QMainWindow):
     def init_ui(self):
         # 修改窗口初始状态
         self.setWindowTitle('晓阅')
-        self.setGeometry(100, 100, 1400, 800)
-        self.showMaximized()  # 默认最大化
+        self.setGeometry(100, 100, 1500, 800)  # 只保留这行，删除 showMaximized()
 
         # 修改布局为三段式
         main_widget = QWidget()
@@ -1887,9 +1886,28 @@ class EbookManager(QMainWindow):
     def clear_current_labels(self):
         """清除当前页面的标签"""
         try:
-            self.content_display.clear_labels()
+            if self.current_book_path and self.current_page is not None:
+                # 从数据库中删除当前页面的标签
+                book_id = self.books[self.current_book_path]['id']
+                self.cursor.execute(
+                    'DELETE FROM labels WHERE book_id = ? AND page = ?',
+                    (book_id, self.current_page)
+                )
+                self.conn.commit()
+
+                # 从内存中删除当前页面的标签
+                key = f"{self.current_book_path}_{self.current_page}"
+                if key in self.content_display.page_labels:
+                    del self.content_display.page_labels[key]
+
+                # 更新显示
+                self.content_display.update()
+                self.update_labels_list()
+
+                print(f"已清除第 {self.current_page + 1} 页的所有标签")
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"清除标签时出错: {str(e)}")
+            print(f"清除标签失败: {e}")
+            QMessageBox.warning(self, "错误", f"清除标签失败: {str(e)}")
 
     def load_labels(self):
         """从数据库加载标签"""
