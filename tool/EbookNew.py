@@ -12,6 +12,8 @@ from ebooklib import epub
 import json
 import re
 from datetime import datetime
+import sqlite3
+from pathlib import Path
 
 
 class MarkableLabel(QLabel):
@@ -175,9 +177,11 @@ class EbookManager(QMainWindow):
         self.max_zoom = 5.0  # 最大缩放
         self.booklist_visible = True  # 书籍列表显示状态
         self.init_ui()
+        self.init_database()
         self.load_library()
         self.load_notes()
         self.load_marks()
+        self.load_zoom_states()
         self.marking_enabled = False  # 标记状态
         self.zoom_states = {}  # 存储书的缩放状态
         self.load_zoom_states()  # 加载缩放状态
@@ -348,30 +352,214 @@ class EbookManager(QMainWindow):
             }
         """)
 
+    def init_database(self):
+        """初始化数据库"""
+        try:
+            db_path = Path('library.db')
+            self.conn = sqlite3.connect(str(db_path))
+            self.cursor = self.conn.cursor()
+
+            # 创建书籍表
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS books (
+                    path TEXT PRIMARY KEY,
+                    title TEXT,
+                    format TEXT,
+                    size INTEGER
+                )
+            ''')
+
+            # 创建笔记表
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_path TEXT,
+                    content TEXT,
+                    page INTEGER,
+                    timestamp TEXT,
+                    FOREIGN KEY (book_path) REFERENCES books(path)
+                )
+            ''')
+
+            # 创建标记表
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS marks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_path TEXT,
+                    page INTEGER,
+                    start_x INTEGER,
+                    start_y INTEGER,
+                    end_x INTEGER,
+                    end_y INTEGER,
+                    color TEXT,
+                    width INTEGER,
+                    FOREIGN KEY (book_path) REFERENCES books(path)
+                )
+            ''')
+
+            # 创建缩放状态表
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS zoom_states (
+                    book_path TEXT PRIMARY KEY,
+                    zoom_factor REAL,
+                    FOREIGN KEY (book_path) REFERENCES books(path)
+                )
+            ''')
+
+            self.conn.commit()
+        except Exception as e:
+            print(f"初始化数据库失败: {e}")
+
+    def load_library(self):
+        """从数据库加载书库"""
+        try:
+            self.books = {}
+            self.cursor.execute('SELECT * FROM books')
+            for row in self.cursor.fetchall():
+                path, title, format_, size = row
+                self.books[path] = {
+                    'path': path,
+                    'title': title,
+                    'format': format_,
+                    'size': size
+                }
+            self.update_book_tree()
+        except Exception as e:
+            print(f"加载书库失败: {e}")
+
+    def save_library(self):
+        """保存书库到数据库"""
+        try:
+            self.cursor.execute('DELETE FROM books')
+            for path, info in self.books.items():
+                self.cursor.execute(
+                    'INSERT INTO books (path, title, format, size) VALUES (?, ?, ?, ?)',
+                    (path, info['title'], info['format'], info['size'])
+                )
+            self.conn.commit()
+        except Exception as e:
+            print(f"保存书库失败: {e}")
+
+    def load_notes(self):
+        """从数据库加载笔记"""
+        try:
+            self.notes = {}
+            self.cursor.execute('SELECT * FROM notes ORDER BY timestamp')
+            for row in self.cursor.fetchall():
+                _, book_path, content, page, timestamp = row
+                if book_path not in self.notes:
+                    self.notes[book_path] = []
+                self.notes[book_path].append({
+                    'content': content,
+                    'page': page,
+                    'timestamp': timestamp
+                })
+        except Exception as e:
+            print(f"加载笔记失败: {e}")
+
+    def save_notes(self):
+        """保存笔记到数据库"""
+        try:
+            self.cursor.execute('DELETE FROM notes')
+            for book_path, notes in self.notes.items():
+                for note in notes:
+                    self.cursor.execute(
+                        'INSERT INTO notes (book_path, content, page, timestamp) VALUES (?, ?, ?, ?)',
+                        (book_path, note['content'], note['page'], note['timestamp'])
+                    )
+            self.conn.commit()
+        except Exception as e:
+            print(f"保存笔记失败: {e}")
+
+    def load_marks(self):
+        """从数据库加载标记"""
+        try:
+            self.page_marks = {}
+            self.cursor.execute('SELECT * FROM marks')
+            for row in self.cursor.fetchall():
+                _, book_path, page, start_x, start_y, end_x, end_y, color, width = row
+                key = f"{book_path}_{page}"
+                if key not in self.page_marks:
+                    self.page_marks[key] = []
+
+                mark_data = {
+                    'start': QPoint(start_x, start_y),
+                    'end': QPoint(end_x, end_y),
+                    'color': QColor(color),
+                    'width': width
+                }
+                self.page_marks[key].append(mark_data)
+
+            # 同步到 content_display
+            if hasattr(self, 'content_display'):
+                self.content_display.page_marks = self.page_marks.copy()
+
+            print("从数据库加载标记完成")
+        except Exception as e:
+            print(f"从数据库加载标记失败: {e}")
+            self.page_marks = {}
+            if hasattr(self, 'content_display'):
+                self.content_display.page_marks = {}
+
+    def save_marks(self):
+        """保存标记到数据库"""
+        try:
+            self.cursor.execute('DELETE FROM marks')
+            for key, marks in self.page_marks.items():
+                book_path, page = key.rsplit('_', 1)
+                for mark in marks:
+                    self.cursor.execute(
+                        '''INSERT INTO marks 
+                           (book_path, page, start_x, start_y, end_x, end_y, color, width)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (book_path, int(page),
+                         mark['start'].x(), mark['start'].y(),
+                         mark['end'].x(), mark['end'].y(),
+                         mark['color'].name(), mark['width'])
+                    )
+            self.conn.commit()
+            print("标记已保存到数据库")
+        except Exception as e:
+            print(f"保存标记到数据库失败: {e}")
+
+    def load_zoom_states(self):
+        """从数据库加载缩放状态"""
+        try:
+            self.zoom_states = {}
+            self.cursor.execute('SELECT * FROM zoom_states')
+            for row in self.cursor.fetchall():
+                book_path, zoom_factor = row
+                self.zoom_states[book_path] = zoom_factor
+        except Exception as e:
+            print(f"加载缩放状态失败: {e}")
+
+    def save_zoom_states(self):
+        """保存缩放状态到数据库"""
+        try:
+            self.cursor.execute('DELETE FROM zoom_states')
+            for book_path, zoom_factor in self.zoom_states.items():
+                self.cursor.execute(
+                    'INSERT INTO zoom_states (book_path, zoom_factor) VALUES (?, ?)',
+                    (book_path, zoom_factor)
+                )
+            self.conn.commit()
+        except Exception as e:
+            print(f"保存缩放状态失败: {e}")
+
     def closeEvent(self, event):
         """程序关闭时的处理"""
         try:
-            # 保存当前页面的标记
+            # 保存所有数据
             if self.current_book_path and self.marking_enabled:
                 self.save_drawings()
-                self.save_marks()
 
-            # 停止自动保存定时器
-            self.auto_save_timer.stop()
-
-            # 保存其他数据
             self.save_library()
             self.save_notes()
+            self.save_marks()
             self.save_zoom_states()
 
-            # 清理资源
-            if self.current_doc:
-                if isinstance(self.current_doc, fitz.Document):
-                    self.current_doc.close()
-
-            # 清理内存
-            self.content_display.marks.clear()
-            self.page_marks.clear()
+            # 关闭数据库连接
+            self.conn.close()
 
             event.accept()
         except Exception as e:
@@ -387,110 +575,6 @@ class EbookManager(QMainWindow):
             self.left_panel.show()
             self.toggle_booklist_btn.setText('隐藏书籍列表')
         self.booklist_visible = not self.booklist_visible
-
-    def load_library(self):
-        """加载书库"""
-        try:
-            with open('library.json', 'r', encoding='utf-8') as f:
-                self.books = json.load(f)
-            self.update_book_tree()
-        except FileNotFoundError:
-            self.books = {}
-
-    def load_notes(self):
-        """加载笔记"""
-        try:
-            with open('notes.json', 'r', encoding='utf-8') as f:
-                self.notes = json.load(f)
-        except FileNotFoundError:
-            self.notes = {}
-
-    def load_marks(self):
-        """加载标记"""
-        try:
-            if not os.path.exists('marks.json'):
-                print("marks.json 文件不存在")
-                return
-
-            with open('marks.json', 'r', encoding='utf-8') as f:
-                marks_data = json.load(f)
-
-            # 打调试信息
-            print(f"加载的标记数据: {marks_data}")
-
-            # 清空现有标记
-            self.content_display.page_marks.clear()
-            self.page_marks.clear()
-
-            # 加载标记数据
-            for key, marks in marks_data.items():
-                if marks:  # 只处理非空标记
-                    self.page_marks[key] = []
-                    for mark in marks:
-                        try:
-                            # 创建新的标记数据
-                            mark_data = {
-                                'start': QPoint(int(mark['start'][0]), int(mark['start'][1])),
-                                'end': QPoint(int(mark['end'][0]), int(mark['end'][1])),
-                                'color': QColor(mark['color']),
-                                'width': int(mark['width'])
-                            }
-                            self.page_marks[key].append(mark_data)
-                        except (KeyError, ValueError, TypeError) as e:
-                            print(f"处理标记数据时出错: {e}")
-                            continue
-
-            print(f"加载后的 page_marks: {self.page_marks}")
-
-        except Exception as e:
-            print(f"载标记失败: {e}")
-
-    def save_library(self):
-        """保存书库信息"""
-        with open('library.json', 'w', encoding='utf-8') as f:
-            json.dump(self.books, f, ensure_ascii=False, indent=2)
-
-    def save_notes(self):
-        """保存笔记"""
-        with open('notes.json', 'w', encoding='utf-8') as f:
-            json.dump(self.notes, f, ensure_ascii=False, indent=2)
-
-    def save_marks(self):
-        """保存标记"""
-        try:
-            # 使用临时变量存储数据，避免直接操作文件时的问题
-            marks_data = {}
-            for key, marks in self.page_marks.items():
-                if marks:  # 只保存非空的标记
-                    marks_data[key] = [
-                        {
-                            'start': (mark['start'].x(), mark['start'].y()),
-                            'end': (mark['end'].x(), mark['end'].y()),
-                            'color': mark['color'].name(),
-                            'width': mark['width']
-                        }
-                        for mark in marks
-                    ]
-
-            # 打印调试信息
-            print(f"保存标记数据: {marks_data}")
-
-            # 使用临时文件保存，避免直接入可能导致的文件损坏
-            temp_file = 'marks_temp.json'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(marks_data, f, ensure_ascii=False)
-
-            # 如果临时文件保存成功，则替换原文件
-            if os.path.exists(temp_file):
-                if os.path.exists('marks.json'):
-                    os.remove('marks.json')
-                os.rename(temp_file, 'marks.json')
-                print("标记保存成功")
-
-        except Exception as e:
-            print(f"保存标记失败: {e}")
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
 
     def import_books(self):
         """导入书籍"""
@@ -969,24 +1053,6 @@ class EbookManager(QMainWindow):
                 self.zoom_states[self.current_book_path] = self.zoom_factor
             self.show_current_page()
 
-    def save_zoom_states(self):
-        """保存缩放状态"""
-        try:
-            with open('zoom_states.json', 'w', encoding='utf-8') as f:
-                json.dump(self.zoom_states, f)
-        except Exception as e:
-            print(f"保存缩放状态失败: {e}")
-
-    def load_zoom_states(self):
-        """加载缩放状态"""
-        try:
-            with open('zoom_states.json', 'r', encoding='utf-8') as f:
-                self.zoom_states = json.load(f)
-        except FileNotFoundError:
-            self.zoom_states = {}
-        except Exception as e:
-            print(f"加载缩放状态失败: {e}")
-
     def update_zoom_label(self):
         """更新缩放比例显示"""
         self.zoom_label.setText(f"{int(self.zoom_factor * 100)}%")
@@ -1155,7 +1221,7 @@ class EbookManager(QMainWindow):
 
             def save_changes():
                 try:
-                    # 找到当前笔记在列表中的索引
+                    # 找到当前���记在列表中的索引
                     note_list = self.notes[self.current_book_path]
                     note_index = note_list.index(note)
 
@@ -1320,24 +1386,37 @@ class EbookManager(QMainWindow):
                 # 获取当前页面的键值
                 key = f"{self.current_book_path}_{self.current_page}"
 
-                # 保存当前页面的标记到 page_marks
+                # 保存当前页面的标记到数据库
                 if self.content_display.marks:  # 如果有标记
-                    self.page_marks[key] = []
-                    for mark in self.content_display.marks:
-                        self.page_marks[key].append({
-                            'start': QPoint(mark['start'].x(), mark['start'].y()),
-                            'end': QPoint(mark['end'].x(), mark['end'].y()),
-                            'color': QColor(mark['color'].name()),
-                            'width': mark['width']
-                        })
+                    # 先删除当前页面的旧标记
+                    self.cursor.execute('DELETE FROM marks WHERE book_path = ? AND page = ?',
+                                        (self.current_book_path, self.current_page))
 
-                # 保存到文件
-                self.save_marks()
-                # 显示临时提示
-                self.statusBar().showMessage("绘图已保存", 2000)
-                print(f"保存了 {len(self.content_display.marks)} 个标记到 {key}")
+                    # 插入新标记
+                    for mark in self.content_display.marks:
+                        self.cursor.execute(
+                            '''INSERT INTO marks 
+                               (book_path, page, start_x, start_y, end_x, end_y, color, width)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                            (self.current_book_path, self.current_page,
+                             mark['start'].x(), mark['start'].y(),
+                             mark['end'].x(), mark['end'].y(),
+                             mark['color'].name(), mark['width'])
+                        )
+
+                    # 提交事务
+                    self.conn.commit()
+
+                    # 更新内存中的标记
+                    self.page_marks[key] = self.content_display.marks.copy()
+
+                    # 显示临时提示
+                    self.statusBar().showMessage("绘图已保存", 2000)
+                    print(f"保存了 {len(self.content_display.marks)} 个标记到数据库")
+
         except Exception as e:
-            print(f"保存绘图时出错: {str(e)}")
+            print(f"保存绘图到数据库时出错: {str(e)}")
+            QMessageBox.warning(self, "错误", "保存绘图失败")
 
     def load_remaining_items(self):
         """后台加载剩余的项目"""
