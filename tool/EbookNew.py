@@ -13,6 +13,7 @@ import json
 import re
 from datetime import datetime
 
+
 class MarkableLabel(QLabel):
     """可以手写标记的标签"""
 
@@ -26,6 +27,12 @@ class MarkableLabel(QLabel):
         self.setMouseTracking(False)
         self.page_marks = {}  # 存储所有页面的标记
         self.current_page_key = None
+
+        # 添加以下代码，使标签可以接收键盘焦点
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        # 添加以下代码，设置滚动步长
+        self.scroll_step = 50  # 每次滚动的像素值
 
     def mousePressEvent(self, event):
         main_window = self.get_main_window()
@@ -76,7 +83,7 @@ class MarkableLabel(QLabel):
         """设置当前页面，加载对应的标记"""
         self.current_page_key = page_key
         self.marks = []
-        
+
         if page_key in self.page_marks:
             # 创建深拷贝以避免引用问题
             for mark in self.page_marks[page_key]:
@@ -110,6 +117,49 @@ class MarkableLabel(QLabel):
             parent = parent.parent()
         return None
 
+    def get_scroll_area(self):
+        """获取父滚动区域"""
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, QScrollArea):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def keyPressEvent(self, event):
+        """处理键盘事件"""
+        try:
+            scroll_area = self.get_scroll_area()
+            if scroll_area:
+                if event.key() == Qt.Key.Key_Up:  # 上方向键
+                    # 获取当前垂直滚动条的值
+                    current = scroll_area.verticalScrollBar().value()
+                    # 向上滚动
+                    scroll_area.verticalScrollBar().setValue(current - self.scroll_step)
+                    event.accept()
+                elif event.key() == Qt.Key.Key_Down:  # 下方向键
+                    # 获取当前垂直滚动条的值
+                    current = scroll_area.verticalScrollBar().value()
+                    # 向下滚动
+                    scroll_area.verticalScrollBar().setValue(current + self.scroll_step)
+                    event.accept()
+                elif event.key() == Qt.Key.Key_Left:  # 左方向键
+                    main_window = self.get_main_window()
+                    if main_window:
+                        main_window.prev_page()
+                    event.accept()
+                elif event.key() == Qt.Key.Key_Right:  # 右方向键
+                    main_window = self.get_main_window()
+                    if main_window:
+                        main_window.next_page()
+                    event.accept()
+            else:
+                event.ignore()
+        except Exception as e:
+            print(f"处理键盘事件时出错: {e}")
+            event.ignore()
+
+
 class EbookManager(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -129,15 +179,15 @@ class EbookManager(QMainWindow):
         self.load_notes()
         self.load_marks()
         self.marking_enabled = False  # 标记状态
-        self.zoom_states = {}  # 存储本书的缩放状态
+        self.zoom_states = {}  # 存储书的缩放状态
         self.load_zoom_states()  # 加载缩放状态
-        
+
         # 添加自动保存定时器
         self.auto_save_timer = QTimer()
         self.auto_save_timer.timeout.connect(self.auto_save_drawings)
 
     def init_ui(self):
-        self.setWindowTitle('电子书管理系统')
+        self.setWindowTitle('晓阅')
         self.setGeometry(100, 100, 1200, 800)
 
         # 主窗口布局
@@ -182,12 +232,6 @@ class EbookManager(QMainWindow):
         # 工具栏
         self.toolbar = QHBoxLayout()
 
-        # 添加保存按钮到工具栏
-        self.save_button = QPushButton("保存绘图")
-        self.save_button.clicked.connect(self.save_drawings)
-        self.save_button.hide()  # 默认隐藏
-        self.toolbar.addWidget(self.save_button)
-
         # 显示/隐藏书籍列表按钮
         self.toggle_booklist_btn = QPushButton('隐藏书籍列表')
         self.toggle_booklist_btn.clicked.connect(self.toggle_booklist)
@@ -214,13 +258,16 @@ class EbookManager(QMainWindow):
         self.current_book_label.setStyleSheet("font-weight: bold;")
 
         # 其他按钮
-        self.add_note_btn = QPushButton('添加笔')
+        self.save_button = QPushButton("保存标记")
+        self.save_button.hide()  # 隐藏
+        self.toolbar.addWidget(self.save_button)
         self.color_btn = QPushButton('标记颜色')
         self.clear_marks_btn = QPushButton('清除标记')
-
-
+        # 添加保存按钮到工具栏
+        self.add_note_btn = QPushButton('添加笔记')
 
         # 连接信号
+        self.save_button.clicked.connect(self.save_drawings)
         self.prev_btn.clicked.connect(self.prev_page)
         self.next_btn.clicked.connect(self.next_page)
         self.goto_btn.clicked.connect(self.goto_page)
@@ -250,6 +297,7 @@ class EbookManager(QMainWindow):
         scroll_area = QScrollArea()
         self.content_display = MarkableLabel()
         self.content_display.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.content_display.setFocus()  # 设置初始焦点
         scroll_area.setWidget(self.content_display)
         scroll_area.setWidgetResizable(True)
         right_layout.addWidget(scroll_area)
@@ -307,24 +355,24 @@ class EbookManager(QMainWindow):
             if self.current_book_path and self.marking_enabled:
                 self.save_drawings()
                 self.save_marks()
-            
+
             # 停止自动保存定时器
             self.auto_save_timer.stop()
-            
+
             # 保存其他数据
             self.save_library()
             self.save_notes()
             self.save_zoom_states()
-            
+
             # 清理资源
             if self.current_doc:
                 if isinstance(self.current_doc, fitz.Document):
                     self.current_doc.close()
-            
+
             # 清理内存
             self.content_display.marks.clear()
             self.page_marks.clear()
-            
+
             event.accept()
         except Exception as e:
             print(f"关闭程序时出错: {e}")
@@ -373,7 +421,7 @@ class EbookManager(QMainWindow):
             # 清空现有标记
             self.content_display.page_marks.clear()
             self.page_marks.clear()
-            
+
             # 加载标记数据
             for key, marks in marks_data.items():
                 if marks:  # 只处理非空标记
@@ -393,7 +441,7 @@ class EbookManager(QMainWindow):
                             continue
 
             print(f"加载后的 page_marks: {self.page_marks}")
-                
+
         except Exception as e:
             print(f"载标记失败: {e}")
 
@@ -431,14 +479,14 @@ class EbookManager(QMainWindow):
             temp_file = 'marks_temp.json'
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(marks_data, f, ensure_ascii=False)
-            
+
             # 如果临时文件保存成功，则替换原文件
             if os.path.exists(temp_file):
                 if os.path.exists('marks.json'):
                     os.remove('marks.json')
                 os.rename(temp_file, 'marks.json')
                 print("标记保存成功")
-            
+
         except Exception as e:
             print(f"保存标记失败: {e}")
             if os.path.exists(temp_file):
@@ -457,7 +505,7 @@ class EbookManager(QMainWindow):
             self.update_book_tree()
 
     def add_book(self, file_path):
-        """添加书籍到库"""
+        """添加书籍到"""
         try:
             book_info = self.get_book_info(file_path)
             if book_info:
@@ -520,7 +568,7 @@ class EbookManager(QMainWindow):
 
     # 修改 open_book 法
     def open_book(self, item):
-        """打书籍"""
+        """打开书籍"""
         if not item.parent():
             return
 
@@ -541,10 +589,10 @@ class EbookManager(QMainWindow):
             # 清除当前显示的标记
             self.content_display.marks = []
             self.current_page = 0  # 重置页码
-            
+
             # 先加载标记数据
             self.load_marks()
-            
+
             ext = os.path.splitext(file_path)[1].lower()
             if ext == '.pdf':
                 self.open_pdf(file_path)
@@ -556,9 +604,11 @@ class EbookManager(QMainWindow):
                 QMessageBox.warning(self, '错误', f'不支持的文件格式: {ext}')
                 return
 
-            # 更新当前书籍标题
+            # 更新窗口标题为书籍名称
             if file_path in self.books:
-                self.current_book_label.setText(self.books[file_path]['title'])
+                book_title = self.books[file_path]['title']
+                # 设置窗口标题为：电子书管理系统 - 书籍名称
+                self.setWindowTitle(f"晓阅 - 阅我所悦，享受时光 - {book_title}")
 
             # 加载当前页面的标记
             key = f"{file_path}_{self.current_page}"
@@ -572,13 +622,16 @@ class EbookManager(QMainWindow):
                         'color': QColor(mark['color'].name()),
                         'width': mark['width']
                     })
-            
+
             # 设置当前页面键值
             self.content_display.current_page_key = key
-            
+
             # 显示当前页面（包括标记）
             self.show_current_page()
-            
+
+            # 确保阅读框获得焦点
+            self.content_display.setFocus()
+
             # 更新笔记列表
             self.update_notes_list()
 
@@ -599,57 +652,38 @@ class EbookManager(QMainWindow):
         """打开EPUB文件"""
         try:
             # 显示加载提示
-            self.statusBar().showMessage("正在加载电子书...", 2000)
+            self.statusBar().showMessage("正在转换电子书格式...", 2000)
             QApplication.processEvents()
-            
-            # 清理之前的缓存和内容
-            if hasattr(self, 'page_cache'):
-                self.page_cache.clear()
-            if hasattr(self, 'processed_images'):
-                self.processed_images.clear()
-            
-            # 清理内容显示
-            self.content_display.clear()
-            self.content_display.setText("正在加载...")
-            QApplication.processEvents()
-            
-            # 使用更轻量级的方式加载epub
-            self.current_doc = epub.read_epub(file_path, options={'ignore_ncx': True})
-            
-            # 只获取主要内容文件
-            self.epub_items = []
-            for item in self.current_doc.get_items():
-                if item.get_type() == ebooklib.ITEM_DOCUMENT and not item.is_chapter():
-                    self.epub_items.append(item)
-            
-            if not self.epub_items:
-                # 如果没有找到主要内容，尝试获取所有文档项
-                self.epub_items = list(self.current_doc.get_items_of_type(ebooklib.ITEM_DOCUMENT))
-            
-            self.current_page = 0
-            
-            # 创建缓存
-            self.page_cache = {}
-            self.processed_images = {}
-            
-            # 只预加载第一页
-            if self.epub_items:
-                try:
-                    first_item = self.epub_items[0]
-                    content = first_item.get_content().decode('utf-8')
-                    self.page_cache[0] = {
-                        'content': content,
-                        'processed': False
-                    }
-                    # 显示第一页
+
+            # 创建临时PDF文件路径
+            temp_dir = os.path.join(os.path.dirname(__file__), 'temp_pdf')
+            os.makedirs(temp_dir, exist_ok=True)
+            pdf_path = os.path.join(temp_dir, os.path.basename(file_path) + '.pdf')
+
+            # 如果已经有��换好的PDF，直接打开
+            if os.path.exists(pdf_path):
+                self.current_doc = fitz.open(pdf_path)
+                self.current_page = 0
+                self.show_current_page()
+                return
+
+            # 使用 calibre 的命令行工具转换
+            try:
+                import subprocess
+                result = subprocess.run(['ebook-convert', file_path, pdf_path],
+                                        capture_output=True, text=True)
+                if result.returncode == 0:
+                    self.current_doc = fitz.open(pdf_path)
+                    self.current_page = 0
                     self.show_current_page()
-                    
-                    # 在后台加载更多页面
-                    QTimer.singleShot(100, lambda: self.load_epub_pages(1, 2))
-                except Exception as e:
-                    print(f"加载第一页时出错: {e}")
-                    raise
-                
+                else:
+                    raise Exception(f"转换失败: {result.stderr}")
+            except FileNotFoundError:
+                QMessageBox.warning(self, '错误',
+                                    'ebook-convert 工具未找到。请安装 Calibre 软件。\n'
+                                    '下载地址: https://calibre-ebook.com/download')
+                return
+
         except Exception as e:
             QMessageBox.warning(self, '错误', f'打开EPUB失败: {str(e)}')
             print(f"打开EPUB详细错误: {e}")
@@ -671,11 +705,11 @@ class EbookManager(QMainWindow):
                         except Exception as e:
                             print(f"加载第 {page_num} 页时出错: {e}")
                         QApplication.processEvents()
-                
+
                 # 继续加载后面的页面
                 if end_page < len(self.epub_items):
                     QTimer.singleShot(200, lambda: self.load_epub_pages(end_page, 2))
-                
+
         except Exception as e:
             print(f"加载页面时出错: {e}")
 
@@ -735,7 +769,7 @@ class EbookManager(QMainWindow):
                             }
                             self.content_display.marks.append(new_mark)
                         print(f"已加载标记数量: {len(self.content_display.marks)}")
-                    
+
                     self.content_display.current_page_key = key
                     self.content_display.update()
 
@@ -746,7 +780,7 @@ class EbookManager(QMainWindow):
                 if 0 <= self.current_page < len(self.epub_items):
                     # 更新页码显示
                     self.current_page_label.setText(f"{self.current_page + 1}/{len(self.epub_items)}")
-                    
+
                     # 显示加载提示
                     self.statusBar().showMessage("正在加载页面...", 1000)
                     QApplication.processEvents()
@@ -756,13 +790,13 @@ class EbookManager(QMainWindow):
                     if self.current_page in self.page_cache:
                         cache_data = self.page_cache[self.current_page]
                         if not cache_data['processed']:
-                            content = self.process_epub_images(cache_data['content'], 
-                                                            self.epub_items[self.current_page])
+                            content = self.process_epub_images(cache_data['content'],
+                                                               self.epub_items[self.current_page])
                             cache_data['content'] = content
                             cache_data['processed'] = True
                         else:
                             content = cache_data['content']
-                    
+
                     if content is None:
                         # 如果当前页面未缓存，立即加载
                         item = self.epub_items[self.current_page]
@@ -812,7 +846,7 @@ class EbookManager(QMainWindow):
                             }
                             self.content_display.marks.append(new_mark)
                         print(f"已加载标记数量: {len(self.content_display.marks)}")
-                    
+
                     self.content_display.current_page_key = key
                     self.content_display.update()
 
@@ -825,7 +859,7 @@ class EbookManager(QMainWindow):
     def process_epub_images(self, content, item):
         """处理EPUB中的图片路径"""
         try:
-            # 检查是否已经处理过
+            # 查是否已经处理过
             if hasattr(self, 'processed_images') and item.file_name in self.processed_images:
                 return self.processed_images[item.file_name]
 
@@ -843,7 +877,7 @@ class EbookManager(QMainWindow):
                 for image_path in image_paths[:5]:
                     image_name = os.path.basename(image_path)
                     temp_path = os.path.join(temp_dir, image_name)
-                    
+
                     if not os.path.exists(temp_path):
                         # 查找对应的图片项
                         for image in self.current_doc.get_items_of_type(ebooklib.ITEM_IMAGE):
@@ -853,9 +887,9 @@ class EbookManager(QMainWindow):
                                         f.write(image.content)
                                     break
                                 except Exception as e:
-                                    print(f"保存图片失败: {e}")
+                                    print(f"保图片失败: {e}")
                                     continue
-                    
+
                     # 替换图片路径
                     content = content.replace(f'src="{image_path}"', f'src="{temp_path}"')
                     content = content.replace(f"src='{image_path}'", f"src='{temp_path}'")
@@ -874,12 +908,12 @@ class EbookManager(QMainWindow):
         """上一页"""
         try:
             if self.current_doc and self.current_page > 0:
-                # 先保存当前页面的标记
+                # 先保存前页面的标记
                 if self.marking_enabled:
                     self.content_display.save_current_marks()
                     QApplication.processEvents()  # 让界面响应
                     self.save_marks()
-                
+
                 self.current_page -= 1
                 self.show_current_page()
         except Exception as e:
@@ -896,7 +930,7 @@ class EbookManager(QMainWindow):
                             self.content_display.save_current_marks()
                             QApplication.processEvents()  # 让界面响应
                             self.save_marks()
-                        
+
                         self.current_page += 1
                         self.show_current_page()
                 elif isinstance(self.current_doc, epub.EpubBook):
@@ -907,7 +941,7 @@ class EbookManager(QMainWindow):
                             self.content_display.save_current_marks()
                             QApplication.processEvents()  # 让界面响应
                             self.save_marks()
-                        
+
                         self.current_page += 1
                         self.show_current_page()
         except Exception as e:
@@ -967,7 +1001,7 @@ class EbookManager(QMainWindow):
                     self.current_page = page_num
                     self.show_current_page()
                 else:
-                    QMessageBox.warning(self, '警告', '页码超出范围！')
+                    QMessageBox.warning(self, '警告', '页码超范围！')
         except ValueError:
             QMessageBox.warning(self, '警告', '请输入有效的页码！')
 
@@ -989,7 +1023,7 @@ class EbookManager(QMainWindow):
                 # 禁用标记前先保存
                 if self.current_book_path:
                     self.save_drawings()
-                
+
                 # 禁用标记
                 self.marking_enabled = False
                 self.color_btn.setText('标记颜色')
@@ -1049,7 +1083,7 @@ class EbookManager(QMainWindow):
         layout = QVBoxLayout(dialog)
 
         # 笔记内容输入
-        note_label = QLabel('笔记容:')
+        note_label = QLabel('笔记内容:')
         note_edit = QTextEdit()
         layout.addWidget(note_label)
         layout.addWidget(note_edit)
@@ -1226,12 +1260,12 @@ class EbookManager(QMainWindow):
                 current_time = datetime.now()
                 if hasattr(self, 'last_save_time'):
                     time_diff = (current_time - self.last_save_time).total_seconds()
-                    if time_diff < 180:  # 如果距离上次保存不到3分钟，跳过
+                    if time_diff < 180:  # 如果距离��次保存不到3分钟，���过
                         return
-                
+
                 # 获取当前页面的键值
                 key = f"{self.current_book_path}_{self.current_page}"
-                
+
                 # 保存当前页面的标记到 page_marks
                 if self.content_display.marks:  # 如果有标记
                     self.page_marks[key] = []
@@ -1242,7 +1276,7 @@ class EbookManager(QMainWindow):
                             'color': QColor(mark['color'].name()),
                             'width': mark['width']
                         })
-                
+
                 # 保存到文件
                 self.save_marks()
                 self.last_save_time = current_time
@@ -1256,7 +1290,7 @@ class EbookManager(QMainWindow):
             if self.current_book_path and self.marking_enabled:
                 # 获取当前页面的键值
                 key = f"{self.current_book_path}_{self.current_page}"
-                
+
                 # 保存当前页面的标记到 page_marks
                 if self.content_display.marks:  # 如果有标记
                     self.page_marks[key] = []
@@ -1267,7 +1301,7 @@ class EbookManager(QMainWindow):
                             'color': QColor(mark['color'].name()),
                             'width': mark['width']
                         })
-                
+
                 # 保存到文件
                 self.save_marks()
                 # 显示临时提示
@@ -1283,25 +1317,39 @@ class EbookManager(QMainWindow):
                 # 每次加载5个项目
                 start = len(self.epub_items)
                 end = min(start + 5, len(self.total_items))
-                
+
                 self.epub_items.extend(self.total_items[start:end])
                 QApplication.processEvents()
-                
+
                 # 如果还有剩余项目，继续加载
                 if end < len(self.total_items):
                     QTimer.singleShot(100, self.load_remaining_items)
-                
+
                 # 更新页码显示
                 self.current_page_label.setText(f"{self.current_page + 1}/{len(self.total_items)}")
-                
+
         except Exception as e:
             print(f"加载剩余项目时出错: {e}")
 
+    def keyPressEvent(self, event):
+        """处理键盘事件"""
+        try:
+            if event.key() == Qt.Key.Key_Left:  # 左方向键
+                self.prev_page()
+            elif event.key() == Qt.Key.Key_Right:  # 右方向键
+                self.next_page()
+            else:
+                super().keyPressEvent(event)
+        except Exception as e:
+            print(f"处理键盘事件时出错: {e}")
+
+
 def main():
-        app = QApplication(sys.argv)
-        manager = EbookManager()
-        manager.show()
-        sys.exit(app.exec())
+    app = QApplication(sys.argv)
+    manager = EbookManager()
+    manager.show()
+    sys.exit(app.exec())
+
 
 if __name__ == '__main__':
-        main()
+    main()
