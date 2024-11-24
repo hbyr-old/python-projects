@@ -39,7 +39,7 @@ class MarkableLabel(QLabel):
         # 添加触摸和鼠标滑动相关的属性
         self.last_x = None
         self.is_dragging = False
-        self.drag_threshold = 100  # 滑动触发阈值
+        self.drag_threshold = 180  # 滑动触发阈值
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)  # 启用触摸事件
         self.page_turned = False  # 添加标志，防止连续翻页
 
