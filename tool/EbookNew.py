@@ -519,14 +519,27 @@ class EbookManager(QMainWindow):
         # 创建页码显示和输入框
         self.current_page_label = QLabel('0/0')
         self.current_page_label.setFixedWidth(50)
-        self.page_input = QLineEdit()
-        self.page_input.setFixedWidth(50)
-        self.page_input.setPlaceholderText('页码')
-        self.goto_btn = QPushButton('跳转')
 
         # 创建缩放相关控件
         self.zoom_label = QLabel('100%')
         self.zoom_label.setFixedWidth(50)
+
+        self.page_input = QLineEdit()
+        self.page_input.setFixedWidth(50)  # 调整宽度
+        self.page_input.setPlaceholderText('页码')
+        self.page_input.setStyleSheet("""
+            QLineEdit {
+                padding: 4px;
+                border: 1px solid #ddd;
+                border-radius: 3px;
+                background: white;
+                font-size: 14px;
+                text-align: center;
+            }
+        """)
+        self.goto_btn = QPushButton('跳转')
+
+        # 创建缩放相关控件
         self.zoom_in_btn = QPushButton('放大')
         self.zoom_out_btn = QPushButton('缩小')
 
@@ -579,53 +592,34 @@ class EbookManager(QMainWindow):
             self.toggle_labels_btn
         ]
 
-        # 修改按钮样式，调小字体大小和按钮尺寸
+        # 创建页码显示和输入框
+        self.current_page_label = QLabel('0/0')
+        self.current_page_label.setFixedWidth(50)
+
+        # 创建缩放相关控件
+        self.zoom_label = QLabel('100%')
+        self.zoom_label.setFixedWidth(50)
+
+        # 删除原来的 setStyleSheet 代码，改为使用统一的按钮样式
         button_style = """
-            QPushButton {
-                padding: 4px 8px;  /* 减小内边距 */
+            QPushButton, QLabel {  /* 将 QLabel 添加到样式选择器中 */
+                padding: 4px 8px;
                 border: 1px solid #ddd;
                 border-radius: 3px;
                 background: white;
-                min-width: 50px;  /* 减小最小宽度 */
-                max-width: 80px;  /* 减小最大宽度 */
+                min-width: 40px;
+                max-width: 60px;
                 margin: 0px;
-                font-size: 14px;  /* 减小按钮字体大小 */
-                font-weight: bold;
+                font-size: 14px;
             }
             QPushButton:hover {
                 background: #f0f0f0;
             }
-            QLineEdit {
-                padding: 4px;
-                border: 1px solid #ddd;
-                border-radius: 3px;
-                font-size: 14px;  /* 减小输入框字体大小 */
-            }
-            QTreeWidget {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                min-width: 250px;  /* 减小树形列表最小宽度 */
-                font-size: 14px;  /* 减小树形列表字体大小 */
-            }
-            QTreeWidget::item {
-                height: 30px;  /* 减小列表项高度 */
-                font-size: 14px;  /* 减小列表项字体大小 */
-            }
-            QLabel {
-                padding: 2px;
-                font-size: 14px;  /* 减小标签字体大小 */
-            }
         """
-
-        # 设置全局字体
-        app = QApplication.instance()
-        font = app.font()
-        font.setPointSize(14)  # 减小全局字体大小
-        app.setFont(font)
 
         # 应用按钮样式并添加到工具栏
         for button in buttons:
-            if isinstance(button, QPushButton):
+            if isinstance(button, (QPushButton, QLabel)):  # 同时处理按钮和标签
                 button.setStyleSheet(button_style)
             self.toolbar.addWidget(button)
 
@@ -828,7 +822,7 @@ class EbookManager(QMainWindow):
                            VALUES (?, ?, ?, ?)''',
                         (path, info['title'], info['format'], info['size'])
                     )
-                    # 获取新插入记录的ID
+                    # 获取新插���记录的ID
                     info['id'] = self.cursor.lastrowid
             self.conn.commit()
         except Exception as e:
@@ -1397,7 +1391,7 @@ class EbookManager(QMainWindow):
             if self.current_doc:
                 if isinstance(self.current_doc, fitz.Document):
                     if self.current_page < len(self.current_doc) - 1:
-                        # 先保存当前页面的标记
+                        # 先保存当前页面���标记
                         if self.marking_enabled:
                             self.content_display.save_current_marks()
                             QApplication.processEvents()  # 让界面响应
@@ -1607,7 +1601,7 @@ class EbookManager(QMainWindow):
                     # 关闭对话框
                     dialog.accept()
                 except Exception as e:
-                    print(f"保存笔记修改时出错: {e}")
+                    print(f"保存笔��修改时出错: {e}")
                     QMessageBox.warning(self, "错误", "保存笔记失败")
 
             save_btn.clicked.connect(save_changes)
