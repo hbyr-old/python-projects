@@ -518,6 +518,7 @@ class EbookManager(QMainWindow):
 
         # 创建页码显示和输入框
         self.current_page_label = QLabel('0/0')
+        self.current_page_label.setStyleSheet("font-size: 14px; font-weight: normal;")
         self.current_page_label.setFixedWidth(50)
         self.page_input = QLineEdit()
         self.page_input.setFixedWidth(50)
@@ -526,6 +527,7 @@ class EbookManager(QMainWindow):
 
         # 创建缩放相关控件
         self.zoom_label = QLabel('100%')
+        self.zoom_label.setStyleSheet("font-size: 14px; font-weight: normal;")
         self.zoom_label.setFixedWidth(50)
         self.zoom_in_btn = QPushButton('放大')
         self.zoom_out_btn = QPushButton('缩小')
