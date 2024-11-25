@@ -92,7 +92,7 @@ class MarkableLabel(QLabel):
             self.page_turned = False  # 重置翻页标志
 
     def mouseMoveEvent(self, event):
-        """处理鼠标移动事件"""
+        """处理鼠标移���事件"""
         main_window = self.get_main_window()
         if not main_window:
             return
@@ -345,7 +345,7 @@ class MarkableLabel(QLabel):
 class EbookManager(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.supported_formats = ['.epub', '.pdf', '.txt']
+        self.supported_formats = ['.epub', '.pdf', '.txt', '.mobi', '.azw', '.azw3']
         self.books = {}  # 存储书籍信息
         self.notes = {}  # 存储笔记信息
         self.current_doc = None  # 当前打开的文档
@@ -1113,14 +1113,13 @@ class EbookManager(QMainWindow):
 
             # 加载标记数据
             self.load_marks()
-            self.load_labels()
 
             # 打开文件
             ext = os.path.splitext(file_path)[1].lower()
             if ext == '.pdf':
                 self.open_pdf(file_path)
-            elif ext == '.epub':
-                self.open_epub(file_path)
+            elif ext in ['.epub', '.mobi', '.azw', '.azw3']:
+                self.convert_and_open_ebook(file_path)
             elif ext == '.txt':
                 self.open_txt(file_path)
             else:
@@ -1398,7 +1397,7 @@ class EbookManager(QMainWindow):
             if self.current_doc:
                 if isinstance(self.current_doc, fitz.Document):
                     if self.current_page < len(self.current_doc) - 1:
-                        # 先保存当前页面的标记
+                        # 先保存当前页��的标记
                         if self.marking_enabled:
                             self.content_display.save_current_marks()
                             QApplication.processEvents()  # 让界面响应
@@ -1885,7 +1884,7 @@ class EbookManager(QMainWindow):
             QMessageBox.warning(self, "错误", f"选择标签颜色时出错: {str(e)}")
 
     def clear_current_labels(self):
-        """清除当前页面的标签"""
+        """清除当前页面的���签"""
         try:
             if self.current_book_path and self.current_page is not None:
                 # 从数据库中删除当前页面的标签
@@ -2111,6 +2110,65 @@ class EbookManager(QMainWindow):
         if hasattr(self.content_display, 'highlight_label'):
             self.content_display.highlight_label = None
             self.content_display.update()
+
+    def convert_and_open_ebook(self, file_path):
+        """转换并打开电子书"""
+        try:
+            # 显示转换提示
+            self.statusBar().showMessage("正在转换电子书格式...", 2000)
+            QApplication.processEvents()
+
+            # 创建临时PDF文件路径
+            temp_dir = os.path.join(os.path.dirname(__file__), 'temp_pdf')
+            os.makedirs(temp_dir, exist_ok=True)
+            pdf_path = os.path.join(temp_dir, os.path.basename(file_path) + '.pdf')
+
+            # 如果已经有转换好的PDF，直接打开
+            if os.path.exists(pdf_path):
+                self.current_doc = fitz.open(pdf_path)
+                self.current_page = 0
+                self.show_current_page()
+                return
+
+            # 使用 calibre 的命令行工具转换
+            try:
+                import subprocess
+                # 添加转换参数以优化输出质量
+                cmd = [
+                    'ebook-convert',
+                    file_path,
+                    pdf_path,
+                    '--pdf-page-numbers',
+                    '--paper-size', 'a4',
+                    '--pdf-default-font-size', '12',
+                    '--pdf-serif-family', 'Times New Roman',
+                    '--pdf-sans-family', 'Arial',
+                    '--pdf-mono-family', 'Courier New',
+                    '--preserve-cover-aspect-ratio'
+                ]
+
+                result = subprocess.run(cmd, capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    self.current_doc = fitz.open(pdf_path)
+                    self.current_page = 0
+                    self.show_current_page()
+                else:
+                    raise Exception(f"转换失败: {result.stderr}")
+
+            except FileNotFoundError:
+                QMessageBox.warning(
+                    self,
+                    '错误',
+                    '未找到 ebook-convert 工具。请安装 Calibre 软件。\n'
+                    '下载地址: https://calibre-ebook.com/download\n'
+                    '安装后需要重启程序。'
+                )
+                return
+
+        except Exception as e:
+            QMessageBox.warning(self, '错误', f'转换电子书失败: {str(e)}')
+            print(f"转换电子书详细错误: {e}")
 
 
 def main():
