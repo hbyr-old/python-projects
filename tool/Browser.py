@@ -1,19 +1,278 @@
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLineEdit, QPushButton, QTreeWidget,
-                             QTreeWidgetItem, QInputDialog, QMenu, QDialog, QLabel)
+                             QTreeWidgetItem, QInputDialog, QMenu, QDialog, QLabel,
+                             QToolBar, QColorDialog, QMessageBox)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QAction
-import json
+from PyQt6.QtWebEngineCore import QWebEngineSettings
+from PyQt6.QtCore import Qt, QUrl, QPoint, QByteArray, QBuffer, QIODevice
+from PyQt6.QtGui import QAction, QPainter, QPen, QColor, QPixmap
+from PyQt6.QtSql import QSqlDatabase, QSqlQuery
+
+
+def init_database():
+    """初始化数据库"""
+    db = QSqlDatabase.addDatabase('QSQLITE')
+    db.setDatabaseName('browser.db')
+    if not db.open():
+        return False
+
+    query = QSqlQuery()
+
+    # 创建书签表
+    query.exec("""
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL
+        )
+    """)
+
+    # 创建绘图数据表
+    query.exec("""
+        CREATE TABLE IF NOT EXISTS drawings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT NOT NULL,
+            drawing_data BLOB NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # 检查是否需要添加默认分类
+    query.exec("SELECT COUNT(*) FROM bookmarks")
+    if query.next() and query.value(0) == 0:
+        # 添加默认分类
+        default_categories = ["常用", "工作", "学习", "其他"]
+        for category in default_categories:
+            query.prepare("INSERT INTO bookmarks (category, title, url) VALUES (?, '默认书签', 'about:blank')")
+            query.addBindValue(category)
+            query.exec()
+
+    return True
+
+
+class DrawingLayer(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.drawing = False
+        self.last_point = None
+        self.pixmap = QPixmap(self.size())
+        self.pixmap.fill(Qt.GlobalColor.transparent)
+        self.pen_color = QColor(255, 0, 0)
+        self.pen_width = 2
+        self.lines = []
+        self.eraser_mode = False  # 添加擦除模式标志
+        self.eraser_size = 20  # 添加擦除器大小
+
+        # 修改窗口属性
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.setStyleSheet("background-color: transparent;")
+
+    def toggle_eraser(self):
+        """切换擦除模式"""
+        self.eraser_mode = not self.eraser_mode
+        # 更改鼠标样式
+        if self.eraser_mode:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
+
+    def set_eraser_size(self, size):
+        """设置擦除器大小"""
+        self.eraser_size = size
+
+    def erase_at_point(self, point):
+        """在指定点擦除内容"""
+        painter = QPainter(self.pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.setPen(QPen(Qt.GlobalColor.transparent, self.eraser_size, Qt.PenStyle.SolidLine))
+        painter.drawPoint(point)
+        self.update()
+
+        # 立即保存更改到数据库
+        if isinstance(self.parent(), QWebEngineView):
+            self.save_to_database(self.parent().url().toString())
+
+    def draw_line(self, start, end):
+        """绘制线条"""
+        painter = QPainter(self.pixmap)
+        painter.setPen(QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine))
+        painter.drawLine(start, end)
+        self.lines.append((start, end, self.pen_color, self.pen_width))
+        self.update()
+
+    def clear(self):
+        """清除绘图"""
+        self.pixmap.fill(Qt.GlobalColor.transparent)
+        self.lines = []
+        self.update()
+        # 从数据库中删除当前URL的绘图数据
+        if isinstance(self.parent(), QWebEngineView):
+            url = self.parent().url().toString()
+            query = QSqlQuery()
+            query.prepare("DELETE FROM drawings WHERE url = ?")
+            query.addBindValue(url)
+            query.exec()
+
+    def save_to_database(self, url):
+        """保存绘图数据到数据库"""
+        # 将pixmap转换为字节数据
+        byte_array = QByteArray()
+        buffer = QBuffer(byte_array)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        self.pixmap.save(buffer, "PNG")
+        buffer.close()
+
+        # 保存到数据库，使用REPLACE语法确保更新现有记录
+        query = QSqlQuery()
+        query.prepare("""
+            INSERT OR REPLACE INTO drawings (url, drawing_data)
+            VALUES (?, ?)
+        """)
+        query.addBindValue(url)
+        query.addBindValue(byte_array)
+        success = query.exec()
+
+        # 确保数据被写入
+        if success:
+            query.finish()
+            return True
+        return False
+
+    def load_from_database(self, url):
+        """从数据库加载绘图数据"""
+        query = QSqlQuery()
+        query.prepare("SELECT drawing_data FROM drawings WHERE url = ?")
+        query.addBindValue(url)
+
+        if query.exec() and query.next():
+            drawing_data = query.value(0)
+            new_pixmap = QPixmap()
+            if new_pixmap.loadFromData(drawing_data):
+                # 调整加载的pixmap大小以匹配当前大小
+                if new_pixmap.size() != self.size():
+                    new_pixmap = new_pixmap.scaled(self.size(),
+                                                   Qt.AspectRatioMode.IgnoreAspectRatio,
+                                                   Qt.TransformationMode.SmoothTransformation)
+                self.pixmap = new_pixmap
+                self.update()
+                return True
+        return False
+
+    def paintEvent(self, event):
+        """重写绘图事件"""
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self.pixmap)
+
+    def resizeEvent(self, event):
+        """重写调整大小事件"""
+        old_pixmap = self.pixmap
+        new_size = event.size()
+        new_pixmap = QPixmap(new_size)
+        new_pixmap.fill(Qt.GlobalColor.transparent)
+
+        if not old_pixmap.isNull():
+            # 保持绘图内容，进行缩放
+            painter = QPainter(new_pixmap)
+            scaled_pixmap = old_pixmap.scaled(new_size,
+                                              Qt.AspectRatioMode.IgnoreAspectRatio,
+                                              Qt.TransformationMode.SmoothTransformation)
+            painter.drawPixmap(0, 0, scaled_pixmap)
+            painter.end()
+
+        self.pixmap = new_pixmap
+        super().resizeEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drawing = True
+            self.last_point = event.pos()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drawing = False
+            self.last_point = None
+            # 无论是绘图还是擦除，都保存到数据库
+            if isinstance(self.parent(), QWebEngineView):
+                self.save_to_database(self.parent().url().toString())
+
+    def mouseMoveEvent(self, event):
+        if self.drawing and self.last_point:
+            current_point = event.pos()
+            if self.eraser_mode:
+                # 擦除模式
+                self.erase_at_point(current_point)
+            else:
+                # 绘图模式
+                self.draw_line(self.last_point, current_point)
+            self.last_point = current_point
 
 
 class SimpleBrowser(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.bookmark_visible = True  # 添加收藏夹显示状态标记
+        self.bookmark_visible = True
+        self.drawing_enabled = False
+
+        # 初始化数据库
+        if not init_database():
+            QMessageBox.critical(self, "错误", "无法初始化数据库！")
+            sys.exit(1)
+
         self.init_ui()
         self.load_bookmarks()
+        self.setup_drawing_toolbar()
+
+    def setup_drawing_toolbar(self):
+        """设置绘图工具栏"""
+        drawing_toolbar = QToolBar("图工具", self)
+        self.addToolBar(Qt.ToolBarArea.RightToolBarArea, drawing_toolbar)
+
+        # 切换绘图式按钮
+        self.toggle_drawing_action = QAction("✏️", self)
+        self.toggle_drawing_action.setCheckable(True)
+        self.toggle_drawing_action.triggered.connect(self.toggle_drawing_mode)
+        drawing_toolbar.addAction(self.toggle_drawing_action)
+
+        # 颜色选择按钮
+        color_action = QAction("🎨", self)
+        color_action.triggered.connect(self.choose_color)
+        drawing_toolbar.addAction(color_action)
+
+        # 擦除工具按钮
+        eraser_action = QAction("🧽", self)
+        eraser_action.setCheckable(True)
+        eraser_action.triggered.connect(self.toggle_eraser)
+        drawing_toolbar.addAction(eraser_action)
+
+        # 擦除器大小按钮
+        small_eraser_action = QAction("小橡皮", self)
+        small_eraser_action.triggered.connect(lambda: self.set_eraser_size(10))
+        drawing_toolbar.addAction(small_eraser_action)
+
+        medium_eraser_action = QAction("中橡皮", self)
+        medium_eraser_action.triggered.connect(lambda: self.set_eraser_size(20))
+        drawing_toolbar.addAction(medium_eraser_action)
+
+        large_eraser_action = QAction("大橡皮", self)
+        large_eraser_action.triggered.connect(lambda: self.set_eraser_size(30))
+        drawing_toolbar.addAction(large_eraser_action)
+
+        # 清除按钮
+        clear_action = QAction("🗑️", self)
+        clear_action.triggered.connect(self.clear_drawing)
+        drawing_toolbar.addAction(clear_action)
+
+        # 设置画笔宽度按钮
+        thin_pen_action = QAction("细线", self)
+        thin_pen_action.triggered.connect(lambda: self.set_pen_width(2))
+        drawing_toolbar.addAction(thin_pen_action)
+
+        thick_pen_action = QAction("粗线", self)
+        thick_pen_action.triggered.connect(lambda: self.set_pen_width(5))
+        drawing_toolbar.addAction(thick_pen_action)
 
     def init_ui(self):
         self.setWindowTitle('简洁浏览器')
@@ -23,15 +282,35 @@ class SimpleBrowser(QMainWindow):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)  # 移除主布局边距
-        main_layout.setSpacing(0)  # 移除组件间距
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # 顶部导航栏
+        # 创建浏览器视图并设置权限
+        self.browser = QWebEngineView()
+        self.browser.urlChanged.connect(self.update_url)
+
+        # 设置页面设置以忽略某些权限警告
+        settings = self.browser.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
+
+        # 创建绘图层
+        self.drawing_layer = DrawingLayer(self.browser)
+        self.drawing_layer.hide()
+
+        # 浏览器视图容器
+        self.browser_container = QWidget()
+        browser_layout = QVBoxLayout(self.browser_container)
+        browser_layout.setContentsMargins(0, 0, 0, 0)
+        browser_layout.addWidget(self.browser)
+
+        # 顶导航栏
         nav_bar = QWidget()
-        nav_bar.setFixedHeight(50)  # 固定导航栏高度
-        nav_bar.setObjectName("nav_bar")  # 设置对象名以便应用样式
+        nav_bar.setFixedHeight(50)
+        nav_bar.setObjectName("nav_bar")
         nav_layout = QHBoxLayout(nav_bar)
-        nav_layout.setContentsMargins(5, 5, 5, 5)  # 设置导航栏内边距
+        nav_layout.setContentsMargins(5, 5, 5, 5)
 
         # 添加显示/隐藏收藏夹按钮
         self.toggle_bookmark_btn = QPushButton('☰')
@@ -68,9 +347,6 @@ class SimpleBrowser(QMainWindow):
         nav_layout.addWidget(self.url_bar)
         nav_layout.addWidget(self.bookmark_btn)
 
-        # 添加导航栏到主布局
-        main_layout.addWidget(nav_bar, 0)  # 导航栏不拉伸
-
         # 下方的内容区域
         content_widget = QWidget()
         self.content_layout = QHBoxLayout(content_widget)
@@ -78,7 +354,7 @@ class SimpleBrowser(QMainWindow):
         self.content_layout.setSpacing(0)
 
         # 左侧收藏夹面板
-        self.bookmark_widget = QWidget()  # 保存为实例变量
+        self.bookmark_widget = QWidget()
         self.bookmark_widget.setFixedWidth(250)
         bookmark_layout = QVBoxLayout(self.bookmark_widget)
         bookmark_layout.setContentsMargins(0, 0, 0, 0)
@@ -91,26 +367,14 @@ class SimpleBrowser(QMainWindow):
         self.bookmark_tree.customContextMenuRequested.connect(self.show_bookmark_menu)
         bookmark_layout.addWidget(self.bookmark_tree)
 
-        # 浏览器视图容器
-        self.browser_container = QWidget()
-        browser_layout = QVBoxLayout(self.browser_container)
-        browser_layout.setContentsMargins(0, 0, 0, 0)
-
-        # 浏览器视图
-        self.browser = QWebEngineView()
-        self.browser.urlChanged.connect(self.update_url)
-        browser_layout.addWidget(self.browser)
-
         # 添加到内容布局
         self.content_layout.addWidget(self.bookmark_widget)
         self.content_layout.addWidget(self.browser_container)
-
-        # 设置伸缩因子
-        self.content_layout.setStretch(1, 1)  # 浏览器视图可伸缩
+        self.content_layout.setStretch(1, 1)
 
         # 添加内容区域到主布局
-        main_layout.addWidget(nav_bar, 0)  # 导航栏不拉伸
-        main_layout.addWidget(content_widget, 1)  # 内容区域占用所有剩余空间
+        main_layout.addWidget(nav_bar, 0)
+        main_layout.addWidget(content_widget, 1)
 
         # 设置主页
         self.browser.setUrl(QUrl('https://www.google.com'))
@@ -146,25 +410,56 @@ class SimpleBrowser(QMainWindow):
         """)
 
     def load_bookmarks(self):
-        """加载收藏夹"""
-        try:
-            with open('bookmarks.json', 'r', encoding='utf-8') as f:
-                self.bookmarks = json.load(f)
-        except FileNotFoundError:
-            self.bookmarks = {
-                "分类": {
-                    "常用": [],
-                    "工作": [],
-                    "学习": [],
-                    "其他": []
-                }
-            }
+        """从数据库加载书签"""
+        self.bookmarks = {"分类": {}}
+        query = QSqlQuery()
+
+        # 获取所有分类
+        query.exec("SELECT DISTINCT category FROM bookmarks")
+        while query.next():
+            category = query.value(0)
+            self.bookmarks["分类"][category] = []
+
+        # 如果没有任何分类，添加默认分类
+        if not self.bookmarks["分类"]:
+            default_categories = ["常用", "工作", "学习", "其他"]
+            for category in default_categories:
+                self.bookmarks["分类"][category] = []
+                query.prepare("INSERT INTO bookmarks (category, title, url) VALUES (?, '默认书签', 'about:blank')")
+                query.addBindValue(category)
+                query.exec()
+
+        # 获取每个分类的书签
+        for category in self.bookmarks["分类"].keys():
+            query.prepare("SELECT title, url FROM bookmarks WHERE category = ?")
+            query.addBindValue(category)
+            if query.exec():
+                while query.next():
+                    self.bookmarks["分类"][category].append({
+                        'title': query.value(0),
+                        'url': query.value(1)
+                    })
+
         self.update_bookmark_tree()
 
     def save_bookmarks(self):
-        """保存收藏夹"""
-        with open('bookmarks.json', 'w', encoding='utf-8') as f:
-            json.dump(self.bookmarks, f, ensure_ascii=False, indent=2)
+        """保存书签到数据库"""
+        query = QSqlQuery()
+
+        # 清空现有书签
+        query.exec("DELETE FROM bookmarks")
+
+        # 插入新的签数据
+        for category, bookmarks in self.bookmarks["分类"].items():
+            for bookmark in bookmarks:
+                query.prepare("""
+                    INSERT INTO bookmarks (category, title, url)
+                    VALUES (?, ?, ?)
+                """)
+                query.addBindValue(category)
+                query.addBindValue(bookmark['title'])
+                query.addBindValue(bookmark['url'])
+                query.exec()
 
     def update_bookmark_tree(self):
         """更新收藏夹显示"""
@@ -417,7 +712,7 @@ class SimpleBrowser(QMainWindow):
             category = item.parent().text(0)
             old_title = item.text(0)
 
-            # 找到并更新书签
+            # 到并更新书签
             for bookmark in self.bookmarks["分类"][category]:
                 if bookmark['title'] == old_title:
                     bookmark['title'] = name_edit.text()
@@ -432,11 +727,11 @@ class SimpleBrowser(QMainWindow):
         save_btn.clicked.connect(save_changes)
         cancel_btn.clicked.connect(dialog.reject)
 
-        # 显示对话框
+        # 显示话框
         dialog.exec()
 
     def delete_bookmark(self, item):
-        """删除收藏"""
+        """删除藏"""
         category = item.parent().text(0)
         bookmark_title = item.text(0)
 
@@ -457,20 +752,45 @@ class SimpleBrowser(QMainWindow):
 
     def navigate_to_url(self):
         """导航到输入的网址"""
+        # 如果在绘图模式下，先保存当前页面的绘图
+        if self.drawing_enabled:
+            self.drawing_layer.save_to_database(self.browser.url().toString())
+
         url = self.url_bar.text()
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         self.browser.setUrl(QUrl(url))
 
     def update_url(self, url):
-        """更新地址栏"""
+        """更新地址栏并加载对应的绘图数据"""
         self.url_bar.setText(url.toString())
         self.url_bar.setCursorPosition(0)
 
+        # 如果绘图模式已启用，加该URL对应的绘图数据
+        if self.drawing_enabled:
+            # 调整绘图层大小
+            self.drawing_layer.setGeometry(0, 0,
+                                           self.browser.width(),
+                                           self.browser.height())
+            # 先清空当前绘图内容
+            self.drawing_layer.pixmap.fill(Qt.GlobalColor.transparent)
+            # 加载新页面的绘图数据
+            self.drawing_layer.load_from_database(url.toString())
+            self.drawing_layer.show()
+            self.drawing_layer.raise_()
+
     def navigate_back(self):
+        """返回上一页"""
+        # 如果在绘图模式下，先保存当前页面的绘图
+        if self.drawing_enabled:
+            self.drawing_layer.save_to_database(self.browser.url().toString())
         self.browser.back()
 
     def navigate_forward(self):
+        """前进到下一页"""
+        # 如果在绘图模式下，先保存当前页面的绘图
+        if self.drawing_enabled:
+            self.drawing_layer.save_to_database(self.browser.url().toString())
         self.browser.forward()
 
     def reload_page(self):
@@ -491,6 +811,75 @@ class SimpleBrowser(QMainWindow):
 
         self.bookmark_visible = not self.bookmark_visible
 
+    def toggle_drawing_mode(self):
+        """切换绘图模式"""
+        if self.drawing_enabled:
+            # 关闭绘图模式前保存当前内容
+            current_url = self.browser.url().toString()
+            self.drawing_layer.save_to_database(current_url)
+            # 清空绘图层
+            self.drawing_layer.pixmap.fill(Qt.GlobalColor.transparent)
+            self.drawing_layer.update()
+            self.drawing_layer.hide()
+            # 更新工具栏按钮状态
+            self.toggle_drawing_action.setChecked(False)
+        else:
+            # 开启绘图模式
+            # 调整绘图层大小以匹配浏览器视图
+            self.drawing_layer.setGeometry(0, 0,
+                                           self.browser.width(),
+                                           self.browser.height())
+
+            # 创建新的空白 pixmap
+            self.drawing_layer.pixmap = QPixmap(self.drawing_layer.size())
+            self.drawing_layer.pixmap.fill(Qt.GlobalColor.transparent)
+
+            # 加载当前页面的绘图数据
+            current_url = self.browser.url().toString()
+            self.drawing_layer.load_from_database(current_url)
+
+            # 确保绘图层可见并在正确位置
+            self.drawing_layer.show()
+            self.drawing_layer.raise_()
+
+            # 更新工具栏按钮状态
+            self.toggle_drawing_action.setChecked(True)
+
+        # 最后更新状态
+        self.drawing_enabled = not self.drawing_enabled
+
+    def choose_color(self):
+        """选择画笔颜色"""
+        color = QColorDialog.getColor(self.drawing_layer.pen_color, self)
+        if color.isValid():
+            self.drawing_layer.pen_color = color
+
+    def set_pen_width(self, width):
+        """设画笔宽度"""
+        self.drawing_layer.pen_width = width
+
+    def clear_drawing(self):
+        """清除所有绘图"""
+        self.drawing_layer.clear()
+
+    def resizeEvent(self, event):
+        """窗口大小改变事件"""
+        super().resizeEvent(event)
+        if hasattr(self, 'drawing_layer') and hasattr(self, 'browser'):
+            if self.drawing_enabled:
+                # 调整绘图层大小以匹配浏览器视图
+                self.drawing_layer.setGeometry(0, 0,
+                                               self.browser.width(),
+                                               self.browser.height())
+
+    def toggle_eraser(self):
+        """切换擦除模式"""
+        self.drawing_layer.toggle_eraser()
+
+    def set_eraser_size(self, size):
+        """设置擦除器大小"""
+        self.drawing_layer.set_eraser_size(size)
+
 
 def main():
     app = QApplication(sys.argv)
@@ -500,4 +889,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main() 
+    main()
