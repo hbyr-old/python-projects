@@ -1059,7 +1059,7 @@ class EbookManager(QMainWindow):
         """切换书籍列表显示状态"""
         if self.booklist_visible:
             self.left_panel.hide()
-            self.toggle_booklist_btn.setText('显示书表')
+            self.toggle_booklist_btn.setText('显示书列')
         else:
             self.left_panel.show()
             self.toggle_booklist_btn.setText('隐藏书列')
