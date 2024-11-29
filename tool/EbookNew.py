@@ -182,7 +182,7 @@ class MarkableLabel(QLabel):
             painter.setPen(pen)
             painter.drawLine(mark['start'], mark['end'])
 
-        # 绘制������������������前页面的文本标签
+        # 绘�����������������������前页面的文本标签
         if self.current_page_key and self.current_page_key in self.page_labels:
             for label in self.page_labels[self.current_page_key]:
                 # 检查是否是高亮标签
@@ -376,7 +376,7 @@ class EbookManager(QMainWindow):
         self.auto_save_timer = QTimer()
         self.auto_save_timer.timeout.connect(self.auto_save_drawings)
 
-        # 标����态
+        # 标���������
         self.labeling_enabled = False  # 添��������������������������������
 
     def initial_file_check(self):
@@ -817,6 +817,16 @@ class EbookManager(QMainWindow):
             # 启用外键约束
             self.cursor.execute('PRAGMA foreign_keys = ON')
 
+            # 添加保存当前页码的表
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS current_pages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER UNIQUE,
+                    page INTEGER,
+                    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+                )
+            ''')
+
             self.conn.commit()
         except Exception as e:
             print(f"初始化数据库失败: {e}")
@@ -1155,6 +1165,8 @@ class EbookManager(QMainWindow):
                 if self.marking_enabled:
                     self.save_drawings()
                 self.save_current_marks()
+                # 保存当前书籍的页码
+                self.save_current_page()
 
             # 设置新书籍
             self.current_book_path = file_path
@@ -1163,25 +1175,31 @@ class EbookManager(QMainWindow):
 
             # 清除当前显示的标记
             self.content_display.marks = []
-            self.current_page = 0  # 重置页码
 
             # 加载标记数据
             self.load_marks()
 
             # 加载笔记数据
-            self.load_notes()  # 添加：重新加载笔记数据
+            self.load_notes()
 
-            # 打开文件
+            # 打开文件并加载上次阅读的页码
             ext = os.path.splitext(file_path)[1].lower()
             if ext == '.pdf':
                 self.open_pdf(file_path)
+                # 加载上次阅读的页码
+                if not self.load_current_page():  # 如果没有保存的页码，设为第一页
+                    self.current_page = 0
+                    self.save_current_page()
+                self.show_current_page()
             elif ext in ['.epub', '.mobi', '.azw', '.azw3']:
                 self.convert_and_open_ebook(file_path)
+                # 加载上次阅读的页码
+                if not self.load_current_page():  # 如果没有保存的页码，设为第一页
+                    self.current_page = 0
+                    self.save_current_page()
+                self.show_current_page()
             elif ext == '.txt':
                 self.open_txt(file_path)
-            else:
-                QMessageBox.warning(self, '错误', f'不支持的文件格式: {ext}')
-                return
 
             # 更新窗口标题
             if file_path in self.books:
@@ -1191,12 +1209,12 @@ class EbookManager(QMainWindow):
             # 加载当前页面的标记和标签
             key = f"{file_path}_{self.current_page}"
             self.content_display.set_current_page(key)
-            if key in self.page_marks:  # 添加：设置当前页面的标记
+            if key in self.page_marks:
                 self.content_display.marks = self.page_marks[key].copy()
 
             # 更新标签列表和笔记列表
             self.update_labels_list()
-            self.update_notes_list()  # 添加：更新笔记列表
+            self.update_notes_list()
 
         except Exception as e:
             print(f"打开文件详细错误: {e}")
@@ -1206,7 +1224,7 @@ class EbookManager(QMainWindow):
         """打开PDF文件"""
         try:
             self.current_doc = fitz.open(file_path)
-            self.current_page = 0
+            # 不在这里设置 current_page = 0，让 load_current_page 来设置页码
             self.show_current_page()
         except Exception as e:
             QMessageBox.warning(self, '错误', f'打开PDF失败: {str(e)}')
@@ -1296,7 +1314,7 @@ class EbookManager(QMainWindow):
             self.current_doc = None
             self.current_page = 0
 
-            # 尝试不同的编码方式打开文件
+            # 尝试不同的编��方式打开文件
             encodings = ['utf-8', 'gbk', 'gb2312', 'ansi']
             content = None
 
@@ -1447,6 +1465,8 @@ class EbookManager(QMainWindow):
                     self.save_marks()
 
                 self.current_page -= 1
+                # 保存新的页码到数据库
+                self.save_current_page()
                 self.show_current_page()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"切换上一页时出错: {str(e)}")
@@ -1464,6 +1484,8 @@ class EbookManager(QMainWindow):
                             self.save_marks()
 
                         self.current_page += 1
+                        # 保存新的页码到数据库
+                        self.save_current_page()
                         self.show_current_page()
                 elif isinstance(self.current_doc, epub.EpubBook):
                     items = list(self.current_doc.get_items_of_type(ebooklib.ITEM_DOCUMENT))
@@ -1475,9 +1497,11 @@ class EbookManager(QMainWindow):
                             self.save_marks()
 
                         self.current_page += 1
+                        # 保存新的页码到数据库
+                        self.save_current_page()
                         self.show_current_page()
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"切换一页时出错: {str(e)}")
+            QMessageBox.warning(self, "错误", f"切换下一页时出错: {str(e)}")
 
     def zoom_in(self):
         """放大"""
@@ -1511,13 +1535,75 @@ class EbookManager(QMainWindow):
             page_num = int(self.page_input.text()) - 1
             if isinstance(self.current_doc, fitz.Document):
                 if 0 <= page_num < len(self.current_doc):
-                    self.content_display.save_current_marks()  # 保存当前页面标��
+                    self.content_display.save_current_marks()  # 保存当前页面标记
                     self.current_page = page_num
+                    # 保存新的页码到数据库
+                    self.save_current_page()
                     self.show_current_page()
                 else:
-                    QMessageBox.warning(self, '警告', '码超范围！')
+                    QMessageBox.warning(self, '警告', '页码超出范围！')
         except ValueError:
             QMessageBox.warning(self, '警告', '请输入有效的页码！')
+
+    def save_current_page(self):
+        """保存当前页码到数据库"""
+        try:
+            if self.current_book_path and self.current_book_path in self.books:
+                book_id = self.books[self.current_book_path]['id']
+
+                # 检查是否已存在页码记录
+                self.cursor.execute('''
+                    SELECT id FROM current_pages 
+                    WHERE book_id = ?
+                ''', (book_id,))
+
+                result = self.cursor.fetchone()
+
+                if result:
+                    # 更新现有记录
+                    self.cursor.execute('''
+                        UPDATE current_pages 
+                        SET page = ? 
+                        WHERE book_id = ?
+                    ''', (self.current_page, book_id))
+                else:
+                    # 插入新记录
+                    self.cursor.execute('''
+                        INSERT INTO current_pages (book_id, page) 
+                        VALUES (?, ?)
+                    ''', (book_id, self.current_page))
+
+                self.conn.commit()
+                print(f"已保存 {self.books[self.current_book_path]['title']} 的页码: {self.current_page + 1}")
+        except Exception as e:
+            print(f"保存当前页码失败: {e}")
+
+    def load_current_page(self):
+        """从数据库加载上次阅读的页码"""
+        try:
+            if self.current_book_path and self.current_book_path in self.books:
+                book_id = self.books[self.current_book_path]['id']
+
+                self.cursor.execute('''
+                    SELECT page FROM current_pages 
+                    WHERE book_id = ?
+                ''', (book_id,))
+
+                result = self.cursor.fetchone()
+
+                if result:
+                    saved_page = result[0]
+                    # 确保页码在有效范围内
+                    if isinstance(self.current_doc, fitz.Document):
+                        if 0 <= saved_page < len(self.current_doc):
+                            self.current_page = saved_page
+                            return True
+
+                # 如果没有保存的页码或页码无���，返回False
+                return False
+        except Exception as e:
+            print(f"加载上次阅读页码失败: {e}")
+            return False
 
     def choose_color(self):
         """切换标记状态"""
@@ -1658,177 +1744,103 @@ class EbookManager(QMainWindow):
         """查看和编辑笔记"""
         try:
             note = item.data(0, Qt.ItemDataRole.UserRole)
-            if not note:
-                return
+            if note:
+                dialog = QDialog(self)
+                dialog.setWindowTitle('查看/编辑笔记')
+                dialog.setFixedWidth(400)
 
-            dialog = QDialog(self)
-            dialog.setWindowTitle('查看/编辑笔记')
-            dialog.setFixedWidth(400)
-            dialog.setMinimumHeight(300)
+                layout = QVBoxLayout(dialog)
 
-            layout = QVBoxLayout(dialog)
+                # 笔记信息
+                info_label = QLabel(f"页码：第{note['page'] + 1}页\n时间：{note['timestamp']}")
+                layout.addWidget(info_label)
 
-            # 笔记信息
-            info_label = QLabel(f"页码：第{note['page'] + 1}页\n时间：{note['timestamp']}")
-            info_label.setStyleSheet("font-size: 12px; color: #666;")
-            layout.addWidget(info_label)
+                # 笔记内容（可编辑）
+                content_edit = QTextEdit()
+                content_edit.setPlainText(note['content'])
+                content_edit.setReadOnly(False)  # 设置为可编辑
+                layout.addWidget(content_edit)
 
-            # 笔记内容（可编辑）
-            content_edit = QTextEdit()
-            content_edit.setPlainText(note['content'])
-            content_edit.setMinimumHeight(150)
-            content_edit.textChanged.connect(lambda: self.handle_content_change(content_edit, save_btn))
-            layout.addWidget(content_edit)
+                # 按钮布局
+                button_layout = QHBoxLayout()
 
-            # 按钮布局
-            button_layout = QHBoxLayout()
+                # 保存按钮
+                save_btn = QPushButton('保存修改')
 
-            # 保存按钮（初始禁用）
-            save_btn = QPushButton('保存修改')
-            save_btn.setEnabled(False)
-
-            def save_changes():
-                try:
-                    # 开始数据库事务
-                    self.conn.execute('BEGIN')
-
-                    # 更新笔记内容
-                    new_content = content_edit.toPlainText().strip()
-                    if not new_content:
-                        QMessageBox.warning(dialog, "警告", "笔记内容不能为空")
-                        return
-
-                    # 保存旧时间戳用于数据库查询
-                    old_timestamp = note['timestamp']
-
-                    # 更新时间戳
-                    new_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-                    # 更新数据库
-                    book_id = self.books[self.current_book_path]['id']
-                    self.cursor.execute('''
-                        UPDATE notes 
-                        SET content = ?, timestamp = ? 
-                        WHERE book_id = ? AND page = ? AND timestamp = ?
-                    ''', (new_content, new_timestamp, book_id, note['page'], old_timestamp))
-
-                    # 如果更新成功
-                    if self.cursor.rowcount > 0:
-                        # 更新内存中的笔记
-                        note['content'] = new_content
-                        note['timestamp'] = new_timestamp
-
-                        # 提交事务
-                        self.conn.commit()
-
-                        # 重新加载笔记数据
-                        self.load_notes()  # 添加：重新加载笔记数据
-
-                        # 更新界面
-                        info_label.setText(f"页码：第{note['page'] + 1}页\n时间：{new_timestamp}")
-                        save_btn.setEnabled(False)
-
-                        # 更新笔记列表显示
-                        self.update_notes_list()
-
-                        # 显示成功提示
-                        self.statusBar().showMessage("笔记已保存", 2000)
-                    else:
-                        raise Exception("未能找到要更新的笔记")
-
-                except Exception as e:
-                    # 回滚事务
-                    self.conn.rollback()
-                    print(f"保存笔记修改时出错: {e}")
-                    QMessageBox.warning(dialog, "错误", f"保存笔记失败: {str(e)}")
-
-            save_btn.clicked.connect(save_changes)
-            button_layout.addWidget(save_btn)
-
-            # 删除按钮
-            delete_btn = QPushButton('删除')
-
-            def delete_note():
-                reply = QMessageBox.question(
-                    dialog,
-                    '确认删除',
-                    '确定要删除这条笔记吗？此操作不可恢复。',
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No
-                )
-                if reply == QMessageBox.StandardButton.Yes:
+                def save_changes():
                     try:
-                        # 开始事务
-                        self.conn.execute('BEGIN')
-
-                        # 从数据库删除
-                        book_id = self.books[self.current_book_path]['id']
-                        self.cursor.execute('''
-                            DELETE FROM notes 
-                            WHERE book_id = ? AND page = ? AND timestamp = ?
-                        ''', (book_id, note['page'], note['timestamp']))
-
-                        # 从内存中删除
-                        if self.current_book_path in self.notes:
-                            self.notes[self.current_book_path].remove(note)
-                            if not self.notes[self.current_book_path]:
-                                del self.notes[self.current_book_path]
-
-                        # 提交事务
-                        self.conn.commit()
-
-                        # 更新界面
+                        # 更新笔记内容
+                        note['content'] = content_edit.toPlainText()
+                        # 更新时间戳
+                        note['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        # 保存到数据库
+                        self.save_notes()
+                        # 更新列表显示
                         self.update_notes_list()
-                        dialog.accept()
-                        self.statusBar().showMessage("笔记已删除", 2000)
-
+                        # 显示保存成功提示
+                        self.statusBar().showMessage("笔记已保存", 2000)
+                        # 更新预览窗口标题栏时间
+                        info_label.setText(f"页码：第{note['page'] + 1}页\n时间：{note['timestamp']}")
                     except Exception as e:
-                        # 回滚事务
-                        self.conn.rollback()
-                        print(f"删除笔记时出错: {e}")
-                        QMessageBox.warning(dialog, "错误", f"删除笔记失败: {str(e)}")
+                        print(f"保存笔记修改时出错: {e}")
+                        QMessageBox.warning(self, "错误", "保存笔记失败")
 
-            delete_btn.clicked.connect(delete_note)
-            button_layout.addWidget(delete_btn)
+                save_btn.clicked.connect(save_changes)
+                button_layout.addWidget(save_btn)
 
-            # 跳转按钮
-            goto_btn = QPushButton('跳转到页面')
+                # 删除按钮
+                delete_btn = QPushButton('删除')
 
-            def goto_page():
-                try:
-                    self.current_page = note['page']
-                    self.show_current_page()
-                    dialog.accept()
-                    self.statusBar().showMessage(f"已跳转到第 {note['page'] + 1} 页", 2000)
-                except Exception as e:
-                    print(f"跳转到笔记页面时出错: {e}")
-                    QMessageBox.warning(dialog, "错误", f"跳转失败: {str(e)}")
-
-            goto_btn.clicked.connect(goto_page)
-            button_layout.addWidget(goto_btn)
-
-            # 关闭按钮
-            close_btn = QPushButton('关闭')
-
-            def handle_close():
-                if save_btn.isEnabled():
-                    reply = QMessageBox.question(
-                        dialog,
-                        '未保存的修改',
-                        '有未保存的修改，确定要关闭吗？',
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No
-                    )
+                def delete_note():
+                    reply = QMessageBox.question(dialog, '确认删除',
+                                                 '确定要删除这条笔记吗？',
+                                                 QMessageBox.StandardButton.Yes |
+                                                 QMessageBox.StandardButton.No)
                     if reply == QMessageBox.StandardButton.Yes:
+                        try:
+                            # 从笔记列表中删除
+                            if self.current_book_path in self.notes:
+                                self.notes[self.current_book_path].remove(note)
+                                if not self.notes[self.current_book_path]:
+                                    del self.notes[self.current_book_path]
+                                # 保存更改
+                                self.save_notes()
+                                # 更新列表显示
+                                self.update_notes_list()
+                                # 关闭对话框
+                                dialog.accept()
+                                # 显示删除成功提示
+                                self.statusBar().showMessage("笔记已删除", 2000)
+                        except Exception as e:
+                            print(f"删除笔记时出错: {e}")
+                            QMessageBox.warning(self, "错误", "删除笔记失败")
+
+                delete_btn.clicked.connect(delete_note)
+                button_layout.addWidget(delete_btn)
+
+                # 跳转按钮
+                goto_btn = QPushButton('跳转到页面')
+
+                def goto_page():
+                    try:
+                        self.current_page = note['page']
+                        self.show_current_page()
                         dialog.accept()
-                else:
-                    dialog.accept()
+                        self.statusBar().showMessage(f"已跳转到第 {note['page'] + 1} 页", 2000)
+                    except Exception as e:
+                        print(f"跳转到笔记页面时出错: {e}")
+                        QMessageBox.warning(self, "错误", "跳转失败")
 
-            close_btn.clicked.connect(handle_close)
-            button_layout.addWidget(close_btn)
+                goto_btn.clicked.connect(goto_page)
+                button_layout.addWidget(goto_btn)
 
-            layout.addLayout(button_layout)
-            dialog.exec()
+                # 关闭按钮
+                close_btn = QPushButton('关闭')
+                close_btn.clicked.connect(dialog.accept)
+                button_layout.addWidget(close_btn)
+
+                layout.addLayout(button_layout)
+                dialog.exec()
 
         except Exception as e:
             print(f"查看/编辑笔记时出错: {e}")
@@ -2330,7 +2342,7 @@ class EbookManager(QMainWindow):
                     ))
                     self.conn.commit()
 
-                    # 从内存中删除标签
+                    # 从内存���删除标签
                     key = f"{self.current_book_path}_{label_data['page']}"
                     if key in self.content_display.page_labels:
                         # 找到并删除标签
