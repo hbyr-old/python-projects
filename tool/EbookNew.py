@@ -521,7 +521,7 @@ class EbookManager(QMainWindow):
 
         # 首先创建所有按钮
         # 导航按钮
-        self.toggle_booklist_btn = QPushButton('隐���书列')
+        self.toggle_booklist_btn = QPushButton('隐藏书列')
         self.prev_btn = QPushButton('上一页')
         self.next_btn = QPushButton('下一页')
         self.current_page_label = QLabel('0/0')
